@@ -1,0 +1,31 @@
+{
+  "cards": [
+    {
+      "id": "msui5gjhc95qly",
+      "name": "Chase Freedom",
+      "baseRate": 1,
+      "color": "#3aa0ff",
+      "rules": [
+        {
+          "id": "msui5kmkbllwkd",
+          "category": "Groceries",
+          "rate": 5,
+          "cap": 25
+        }
+      ]
+    }
+  ],
+  "transactions": [
+    {
+      "id": "msui5plytpkkcq",
+      "cardId": "msui5gjhc95qly",
+      "category": "Groceries",
+      "amount": 400,
+      "date": "2026-08-10",
+      "note": "",
+      "rate": 5,
+      "cashback": 5,
+      "capped": true
+    }
+  ]
+}
