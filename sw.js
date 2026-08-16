@@ -1,4 +1,7 @@
-const CACHE_NAME = "cashback-tracker-v4";
+/* Bump APP_VERSION here and in app.js + version.json together on every release. */
+const APP_VERSION = "1.0.0";
+const CACHE_NAME = "cashback-tracker-v" + APP_VERSION;
+
 const ASSETS = [
   "./",
   "./index.html",
@@ -26,9 +29,24 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// Network-first so a redeployed version is picked up, with cache as offline fallback.
+self.addEventListener("message", (event) => {
+  if (event.data === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const url = new URL(event.request.url);
+
+  // version.json is the update signal — it must never come from cache.
+  if (url.pathname.endsWith("version.json")) {
+    event.respondWith(
+      fetch(event.request, { cache: "no-store" })
+        .catch(() => new Response("{}", { headers: { "Content-Type": "application/json" } }))
+    );
+    return;
+  }
+
+  // Network-first so a redeploy is picked up, with cache as the offline fallback.
   event.respondWith(
     fetch(event.request)
       .then((res) => {

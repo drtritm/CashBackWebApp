@@ -1,6 +1,12 @@
 (() => {
   "use strict";
 
+  /* App version. Bump this together with version.json and sw.js on every release. */
+  const APP_VERSION = "1.0.0";
+
+  /* NEVER rename these keys. They are where the user's data physically lives —
+     changing one orphans every existing install's history. Schema changes must be
+     migrated in place instead. */
   const KEY = "cashbackTracker_v2";
   const LEGACY_KEY = "cashbackTrackerData_v1";
 
@@ -156,6 +162,101 @@
     takeSnapshot("daily");
     state.settings.lastSnapshotDate = todayStr();
     save();
+  }
+
+  /* If the main record is empty but a snapshot still holds data, the primary key
+     was lost (cleared storage, failed write) while snapshots survived. Bring it back
+     rather than silently showing an empty app. */
+  function autoRestoreIfEmpty() {
+    if (state.cards.length || state.transactions.length) return false;
+    const snap = loadSnapshots().find((s) => s.cards > 0 || s.txns > 0);
+    if (!snap) return false;
+    try {
+      const d = JSON.parse(snap.payload);
+      state.cards = d.cards || [];
+      state.transactions = d.transactions || [];
+      save();
+      return snap;
+    } catch (e) { return false; }
+  }
+
+  /* Ask iOS not to evict this origin's storage on its own. Doesn't stop a manual
+     "Clear Website Data", but it does stop the automatic 7-day purge. */
+  async function requestPersistentStorage() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) return null;
+      if (await navigator.storage.persisted()) return true;
+      return await navigator.storage.persist();
+    } catch (e) { return null; }
+  }
+
+  // ---------------- version & updates ----------------
+  let latestRelease = null;
+
+  function compareVersions(a, b) {
+    const pa = String(a).split(".").map(Number);
+    const pb = String(b).split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  }
+
+  async function checkForUpdate(manual) {
+    try {
+      const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) throw new Error("bad status");
+      const d = await r.json();
+      if (!d || !d.version) throw new Error("no version");
+      if (compareVersions(d.version, APP_VERSION) > 0) {
+        latestRelease = d;
+        showUpdateBar(d);
+        return d;
+      }
+      hideUpdateBar();
+      if (manual) toast(`Up to date · v${APP_VERSION}`);
+      return null;
+    } catch (e) {
+      if (manual) toast("Couldn't check — no connection?");
+      return null;
+    }
+  }
+
+  function showUpdateBar(d) {
+    const bar = document.getElementById("updateBar");
+    bar.innerHTML = `
+      <div class="ub-body">
+        <div class="ub-t1">Version ${esc(d.version)} available</div>
+        <div class="ub-t2">${esc(d.notes || "Tap update to get the latest version.")}</div>
+      </div>
+      <button class="ub-btn" id="ubApply">Update</button>`;
+    bar.hidden = false;
+    document.getElementById("ubApply").addEventListener("click", applyUpdate);
+  }
+  function hideUpdateBar() {
+    const bar = document.getElementById("updateBar");
+    if (bar) bar.hidden = true;
+  }
+
+  /* Replaces the cached code and nothing else. localStorage is deliberately
+     untouched — this is the whole point, so updating never costs the user data. */
+  async function applyUpdate() {
+    const btn = document.getElementById("ubApply");
+    if (btn) { btn.disabled = true; btn.textContent = "Updating…"; }
+    takeSnapshot("pre-update");
+    save();
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (e) { /* fall through to reload regardless */ }
+    location.reload();
   }
 
   /* iOS PWAs handle <a download> poorly; the share sheet is the reliable way to
@@ -1622,11 +1723,49 @@
         </div>
       </div>
 
+      <div class="section-title">Version</div>
+      <div class="panel">
+        <div class="toggle-row" style="margin-bottom:14px;">
+          <span>
+            <span class="tr-t1">Cashback Tracker v${APP_VERSION}</span>
+            <span class="tr-t2" id="persistState">Checking storage protection…</span>
+          </span>
+        </div>
+        <button class="btn btn-secondary" data-action="check-update">Check for Updates</button>
+        <div class="hint" style="margin:12px 0 0;">
+          Updating from inside the app replaces the code only — your cards and history stay put.
+          You never need to delete the app to get a new version.
+        </div>
+      </div>
+
+      <div class="section-title">Keep Your Data Safe</div>
+      <div class="panel warn-panel">
+        <div style="font-size:13.5px;line-height:1.65;color:var(--text-2);">
+          Your history lives in Safari's storage for this site. It survives app updates and restarts,
+          but it is <b style="color:var(--rose)">permanently erased</b> if you:
+          <ul class="tips" style="margin-top:9px;">
+            <li>delete the app from the Home Screen</li>
+            <li>clear Website Data in Settings → Safari</li>
+            <li>reset or change phones</li>
+          </ul>
+          Export a backup file now and then — that file is the only thing that survives all three.
+        </div>
+      </div>
+
       <div class="section-title">Danger Zone</div>
       <button class="btn btn-danger" data-action="wipe">Erase All Data</button>
-      <div class="hint" style="text-align:center;margin-top:20px;">Cashback Tracker · data stored locally on this device</div>
+      <div class="hint" style="text-align:center;margin-top:20px;">Cashback Tracker v${APP_VERSION} · data stored locally on this device</div>
     `;
     document.getElementById("importFile").addEventListener("change", onImport);
+    requestPersistentStorage().then((ok) => {
+      const el = document.getElementById("persistState");
+      if (!el) return;
+      el.textContent = ok === true
+        ? "Storage protected from automatic cleanup"
+        : ok === false
+          ? "iOS may clear storage if unused — back up regularly"
+          : "Storage protection unavailable on this browser";
+    });
     document.getElementById("autoBackupToggle").addEventListener("change", (e) => {
       state.settings.autoBackup = e.target.checked;
       save();
@@ -1793,6 +1932,9 @@
         state.transactions = d.transactions || [];
         save(); closeSheet(); toast("Snapshot restored"); render();
       } catch (err) { alert("That snapshot is unreadable."); }
+    } else if (a === "check-update") {
+      toast("Checking…");
+      checkForUpdate(true);
     } else if (a === "export-ics") exportIcs();
     else if (a === "enable-notif") enableNotifications();
     else if (a === "wipe") {
@@ -1810,9 +1952,15 @@
     if (document.hidden) return;
     runDailyBackup();
     checkReminders(false);
+    checkForUpdate(false);
   });
 
+  // Recover first, so a wiped primary key doesn't get snapshotted as "empty".
+  const restored = autoRestoreIfEmpty();
+  requestPersistentStorage();
   runDailyBackup();
   go("home");
+  if (restored) setTimeout(() => toast(`Recovered your data from ${restored.date}`), 900);
   setTimeout(() => checkReminders(false), 1200);
+  setTimeout(() => checkForUpdate(false), 1500);
 })();
