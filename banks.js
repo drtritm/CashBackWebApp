@@ -7,13 +7,23 @@
    editable and the UI tells the user to confirm against their own card terms.
 
    Rule shape used here:
-     g       group id from MCC_GROUPS               (category-wide rule)
-     mcc     explicit MCC list                      (used when the issuer names codes)
-     rate    percent
-     cap     [amount, "cashback"|"spend", period]   per-rule cap
-     txnCap  [tierAt, capBelow, capAbove]           per-transaction cashback ceiling
+     g         group id from MCC_GROUPS               (category-wide rule)
+     mcc       explicit MCC list                      (used when the issuer names codes)
+     rate      percent
+     cap       [amount, "cashback"|"spend", period]   per-rule cap
+     txnCap    [tierAt, capBelow, capAbove]           per-transaction cashback ceiling
+     minSpend  amount                                 spend needed on THIS rule's category
+                                                        within its cap period before the
+                                                        bonus rate pays out (e.g. MB JCB
+                                                        Platinum needs 2tr on Shopee before
+                                                        its 10% kicks in for that cycle)
    Card-level:
-     cardCap [amount, period, minSpend]             cap across every rule on the card
+     cardCap [amount, period, minSpend]             cap across every rule on the card, and/or
+                                                      a minimum TOTAL card spend per cycle
+                                                      before any cash back on the card pays
+                                                      out at all (e.g. Shinhan My Life needs
+                                                      3tr of total spend before its 10%
+                                                      categories pay out that cycle)
 */
 
 const VN_BANKS = [
@@ -264,6 +274,26 @@ const VN_BANKS = [
     id: "shinhan", name: "Shinhan Bank", grad: "azure",
     cards: [
       {
+        name: "My Life",
+        sub: "10% dining, groceries, rides & entertainment · 3tr minimum spend",
+        baseRate: 0.4,
+        // Whole cycle needs to clear 3.000.000 ₫ of total spend before ANY of the
+        // 10% categories pay out for that cycle — modeled with cardCap.minSpend.
+        cardCap: [1200000, "monthly", 3000000],
+        rules: [
+          { g: "dining", label: "Dining (10%)", rate: 10, cap: [300000, "cashback", "monthly"] },
+          { g: "groceries", label: "Supermarket & convenience (10%)", rate: 10, cap: [300000, "cashback", "monthly"] },
+          { mcc: ["4121"], label: "Ride-hailing & taxi (10%)", rate: 10, cap: [300000, "cashback", "monthly"] },
+          { g: "entertainment", label: "Entertainment (10%)", rate: 10, cap: [300000, "cashback", "monthly"] }
+        ],
+        tips: [
+          "No cash back pays out for the cycle unless total card spend reaches 3.000.000 ₫ — this is a whole-cycle gate, not just for the bonus categories.",
+          "Each of the 4 categories caps at 300.000 ₫ cash back a month (1.200.000 ₫ total).",
+          "0.4% base rate on everything else, uncapped.",
+          "Annual fee is waived if you spend 1.000.000 ₫ within 60 days of opening the card."
+        ]
+      },
+      {
         name: "Visa Cash Back Platinum",
         sub: "0.4% on everything, unlimited",
         baseRate: 0.4,
@@ -319,6 +349,23 @@ const VN_BANKS = [
   {
     id: "mb", name: "MB Bank", grad: "midnight",
     cards: [
+      {
+        name: "JCB Platinum",
+        sub: "10% Shopee & TikTok Shop · 2tr minimum spend per platform",
+        baseRate: 0.3,
+        rules: [
+          // Real card also gates TikTok Shop the same way on its own MCCs; only
+          // Shopee is modeled here since that's the category tracked in-app.
+          { mcc: ["5262", "5964"], label: "Shopee (10%)", rate: 10, cap: [500000, "cashback", "monthly"], minSpend: 2000000 }
+        ],
+        tips: [
+          "10% cash back on genuine merchandise purchased on Shopee, capped at 500.000 ₫ a month.",
+          "Needs at least 2.000.000 ₫ spent on Shopee in the statement cycle before the 10% pays out for that cycle — below that, Shopee purchases earn nothing extra.",
+          "Also covers TikTok Shop with the same 2tr threshold on that platform — not modeled separately here, add a second rule with those MCC codes if you use it.",
+          "Excludes ShopeeFood, ShopeeMart, utility payments, phone top-ups and advertising purchases — only real goods qualify.",
+          "199.000 ₫ annual fee."
+        ]
+      },
       {
         name: "JCB Sakura",
         sub: "Dining & online",
@@ -393,7 +440,8 @@ function buildFromCatalog(entry, mkId) {
       label: r.label || (r.g ? groupName(r.g) : "Custom"),
       rate: r.rate,
       cap: r.cap ? { amount: r.cap[0], type: r.cap[1], period: r.cap[2] } : null,
-      txnCap: r.txnCap ? { tierAt: r.txnCap[0], below: r.txnCap[1], above: r.txnCap[2] } : null
+      txnCap: r.txnCap ? { tierAt: r.txnCap[0], below: r.txnCap[1], above: r.txnCap[2] } : null,
+      minSpend: r.minSpend || 0
     }))
   };
 }

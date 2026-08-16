@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.4.0";
+  const APP_VERSION = "1.5.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -508,12 +508,24 @@
     // Pre-pass: some cards (Cake, MSB Visa Online) pay nothing unless the whole
     // cycle clears a spend threshold, so the gate needs the period total up front.
     const spendAcc = {};
+    // Pre-pass: some rules (MB JCB Platinum's Shopee bonus) only pay out once
+    // spend on THAT category clears a threshold for the cycle, so total up the
+    // matched category spend per rule/period before the main pass runs.
+    const ruleSpendAcc = {};
     for (const t of state.transactions) {
       if (isCash(t)) continue;
       const card = getCard(t.cardId);
-      if (!card || !card.cardCap || !(card.cardCap.minSpend > 0)) continue;
-      const k = `${card.id}|${periodKey(t.date, card.cardCap.period || "monthly")}`;
-      spendAcc[k] = (spendAcc[k] || 0) + t.amount;
+      if (!card) continue;
+      if (card.cardCap && card.cardCap.minSpend > 0) {
+        const k = `${card.id}|${periodKey(t.date, card.cardCap.period || "monthly")}`;
+        spendAcc[k] = (spendAcc[k] || 0) + t.amount;
+      }
+      const { rule } = matchRule(card, t.mcc);
+      if (rule && rule.minSpend > 0) {
+        const period = (rule.cap && rule.cap.period) || "monthly";
+        const k = `${card.id}|${rule.id}|${periodKey(t.date, period)}`;
+        ruleSpendAcc[k] = (ruleSpendAcc[k] || 0) + t.amount;
+      }
     }
 
     const sorted = [...state.transactions].sort((a, b) =>
@@ -532,8 +544,28 @@
       t._pending = false;
       t._shortfall = 0;
 
+      // Rule-level minimum-spend gate (MB JCB Platinum: needs 2tr on Shopee this
+      // cycle before the 10% pays out). Uses the pre-pass total for the whole
+      // cycle, same "qualifies or doesn't" semantics as the card-wide gate below.
+      let ruleGated = false, ruleShortfall = 0;
+      if (rule && rule.minSpend > 0) {
+        const period = (rule.cap && rule.cap.period) || "monthly";
+        const k = `${card.id}|${rule.id}|${periodKey(t.date, period)}`;
+        if ((ruleSpendAcc[k] || 0) < rule.minSpend) {
+          ruleGated = true;
+          ruleShortfall = rule.minSpend - (ruleSpendAcc[k] || 0);
+        }
+      }
+
       let cb, bonusPart = 0, acc4rule = null, eligibleSpend = 0;
-      if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
+      if (ruleGated) {
+        // Doesn't qualify yet — earns nothing, and doesn't burn the rule's own
+        // cashback cap since it never actually got the bonus rate.
+        cb = 0;
+        t._pending = true;
+        t._shortfall = ruleShortfall;
+        t._cbPotential = (t.amount * rate) / 100;
+      } else if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
         cb = (t.amount * rate) / 100;
         bonusPart = cb;
       } else {
@@ -592,10 +624,12 @@
     capUsageCache = acc;
     cardCapCache = cardAcc;
     cardSpendCache = spendAcc;
+    ruleSpendCache = ruleSpendAcc;
   }
   let capUsageCache = {};
   let cardCapCache = {};
   let cardSpendCache = {};
+  let ruleSpendCache = {};
 
   function cardCapUsage(card, dateStr) {
     if (!card.cardCap) return null;
@@ -612,6 +646,20 @@
   function capUsage(card, rule, dateStr) {
     const k = `${card.id}|${rule.id}|${periodKey(dateStr || todayStr(), rule.cap.period)}`;
     return capUsageCache[k] || { cashback: 0, spend: 0 };
+  }
+
+  /* How much has already been spent on a rule's own category this cycle —
+     the running total that must clear rule.minSpend before its bonus pays out. */
+  function ruleSpendUsage(card, rule, dateStr) {
+    if (!rule || !(rule.minSpend > 0)) return 0;
+    const period = (rule.cap && rule.cap.period) || "monthly";
+    const pk = periodKey(dateStr || todayStr(), period);
+    const k = `${card.id}|${rule.id}|${pk}`;
+    return ruleSpendCache[k] != null
+      ? ruleSpendCache[k]
+      : state.transactions
+          .filter((t) => !isCash(t) && t.cardId === card.id && matchRule(card, t.mcc).rule === rule && periodKey(t.date, period) === pk)
+          .reduce((s, t) => s + t.amount, 0);
   }
 
   /* What a hypothetical purchase would earn right now (for the live preview). */
@@ -645,7 +693,7 @@
     }
 
     // Card-wide cap and minimum-spend gate.
-    let pending = false, shortfall = 0, cardRemaining = null;
+    let pending = false, shortfall = 0, cardRemaining = null, gateKind = null;
     const potential = cashback;
     if (card.cardCap) {
       const u = cardCapUsage(card, dateStr) || { used: 0, spend: 0 };
@@ -653,6 +701,7 @@
         // Nothing pays out until the cycle qualifies — show 0, keep the potential.
         pending = true;
         shortfall = card.cardCap.minSpend - (u.spend + amount);
+        gateKind = "card";
         cashback = 0;
       } else if (card.cardCap.amount > 0) {
         cardRemaining = Math.max(0, card.cardCap.amount - u.used);
@@ -660,7 +709,18 @@
       }
     }
 
-    return { cashback, potential, rate, rule, capped, remaining, baseRate: base, txnLimited, pending, shortfall, cardRemaining };
+    // Rule-level minimum-spend gate (e.g. MB JCB Platinum's 2tr Shopee threshold).
+    if (!pending && rule && rule.minSpend > 0) {
+      const used = ruleSpendUsage(card, rule, dateStr);
+      if (used + amount < rule.minSpend) {
+        pending = true;
+        shortfall = rule.minSpend - (used + amount);
+        gateKind = "rule";
+        cashback = 0;
+      }
+    }
+
+    return { cashback, potential, rate, rule, capped, remaining, baseRate: base, txnLimited, pending, shortfall, cardRemaining, gateKind };
   }
 
   function cardTotals(cardId) {
@@ -1128,7 +1188,10 @@
       const q = quote(card, draft.mcc, amt, draft.date);
       const cls = q.pending ? "capped" : q.capped ? "capped" : q.rule ? "" : "base";
       let note;
-      if (q.pending) {
+      if (q.pending && q.gateKind === "rule") {
+        note = `<b>${esc(ruleLabel(q.rule))}</b> needs ${money(q.rule.minSpend)} spent on this category per cycle before its ${q.rate}% pays out. ` +
+          `<b>${money(q.shortfall)}</b> more to go — this purchase would then be worth ${money(q.potential)}.`;
+      } else if (q.pending) {
         note = `This card needs ${money(card.cardCap.minSpend)} of spending per cycle before any cash back pays out. ` +
           `<b>${money(q.shortfall)}</b> more to go — this purchase would then be worth ${money(q.potential)}.`;
       } else if (!q.rule) {
@@ -1473,7 +1536,7 @@
           const scope = r.g ? groupName(r.g) : (r.mcc || []).join(", ");
           return `<div class="row"><div class="glyph">${icon}</div>
             <div class="body"><div class="t1">${esc(r.label || scope)}</div>
-            <div class="t2">${esc(scope)}${r.cap ? " · cap " + money(r.cap[0]) + "/" + PERIOD_LABEL[r.cap[2]] : ""}</div></div>
+            <div class="t2">${esc(scope)}${r.cap ? " · cap " + money(r.cap[0]) + "/" + PERIOD_LABEL[r.cap[2]] : ""}${r.minSpend ? " · needs " + money(r.minSpend) + " spend to unlock" : ""}</div></div>
             <div class="tail"><div class="a1" style="color:var(--gold);">${r.rate}%</div></div></div>`;
         }).join("")}` : ""}
       ${cardCap ? `<div class="section-title">Card-wide limits</div>
@@ -1535,11 +1598,21 @@
           const scope = r.kind === "group"
             ? `${groupIcon(r.groupId)} ${groupName(r.groupId)}`
             : `${(r.mccCodes || []).length} MCC code${(r.mccCodes || []).length === 1 ? "" : "s"}`;
+          let minHtml = "";
+          if (r.minSpend > 0) {
+            const spent = ruleSpendUsage(card, r, todayStr());
+            const met = spent >= r.minSpend;
+            const pct = Math.min(100, (spent / r.minSpend) * 100);
+            minHtml = `<div class="cap-meta" style="color:${met ? "var(--mint)" : "var(--amber)"}">
+                ${met ? "Minimum spend met" : `${money(r.minSpend - spent)} more to unlock`} — ${money(spent)} of ${money(r.minSpend)} this cycle</div>
+              <div class="bar ${met ? "" : "warn"}"><i style="width:${pct}%"></i></div>`;
+          }
           return `<div class="cap-item" data-action="edit-rule" data-cardid="${card.id}" data-ruleid="${r.id}">
             <div class="cap-head"><span class="cap-name">${esc(ruleLabel(r))}</span><span class="cap-rate num">${r.rate}%</span></div>
             <div class="cap-meta">${esc(scope)}</div>
             <div class="cap-meta">${meta}</div>
             ${barHtml}
+            ${minHtml}
           </div>`;
         }).join("")
       : `<div class="empty" style="padding:26px 12px;">No bonus rules yet.<br>Everything earns the ${card.baseRate}% base rate.</div>`;
@@ -1621,9 +1694,11 @@
     // Tracked separately from draftRule.cap: the cap inputs don't exist until the
     // section is switched on, so we can't infer "enabled" from the amount.
     let capEnabled = !!(draftRule.cap && draftRule.cap.amount > 0);
+    let minEnabled = !!(draftRule.minSpend > 0);
 
     function paint() {
       const capOn = capEnabled;
+      const minOn = minEnabled;
       const cap = draftRule.cap || { type: "cashback", amount: 500000, period: "monthly" };
       openSheet(`
         <h2>${rule ? "Edit Rule" : "New Rule"}</h2>
@@ -1705,6 +1780,18 @@
           <div class="hint">Once the cap is hit, extra spend automatically falls back to the ${card.baseRate}% base rate.</div>
         ` : ""}
 
+        <div class="field">
+          <label>Minimum Spend To Unlock</label>
+          <select id="r_minOn">
+            <option value="0" ${!minOn ? "selected" : ""}>No threshold — pays from the first purchase</option>
+            <option value="1" ${minOn ? "selected" : ""}>Requires a minimum spend on this category this cycle</option>
+          </select>
+        </div>
+        ${minOn ? `
+          <div class="field"><label>Minimum Spend (₫)</label><input id="r_minAmt" type="text" inputmode="numeric" value="${formatVnd(draftRule.minSpend || 2000000)}" /></div>
+          <div class="hint">E.g. MB JCB Platinum needs 2.000.000 ₫ spent on Shopee this cycle before its 10% pays out — below that, this category earns nothing extra for the cycle.</div>
+        ` : ""}
+
         <button class="btn btn-primary" id="r_save">${rule ? "Save Rule" : "Add Rule"}</button>
         ${rule ? `<button class="btn btn-danger" id="r_del">Delete Rule</button>` : ""}
         <button class="btn btn-ghost" id="r_cancel">Cancel</button>
@@ -1726,6 +1813,9 @@
         } else if (capEnabled && !draftRule.cap) {
           draftRule.cap = { type: "cashback", amount: 500000, period: "monthly" };
         }
+        minEnabled = document.getElementById("r_minOn").value === "1";
+        const minAmtEl = document.getElementById("r_minAmt");
+        draftRule.minSpend = minEnabled ? parseVnd(minAmtEl ? minAmtEl.value : "") || 0 : 0;
       }
 
       document.getElementById("r_kind").addEventListener("change", (e) => {
@@ -1737,6 +1827,10 @@
         readInputs();
         paint();
       });
+      document.getElementById("r_minOn").addEventListener("change", () => {
+        readInputs();
+        paint();
+      });
       ["r_capType", "r_capPeriod"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.addEventListener("change", readInputs);
@@ -1745,6 +1839,8 @@
       const groupEl = document.getElementById("r_group");
       if (groupEl) groupEl.addEventListener("change", () => { readInputs(); paint(); });
       wireMoneyInput(document.getElementById("r_capAmt"));
+      const minAmtInput = document.getElementById("r_minAmt");
+      if (minAmtInput) wireMoneyInput(minAmtInput);
       const mccBtn = document.getElementById("r_mccBtn");
       if (mccBtn) {
         mccBtn.addEventListener("click", () => {

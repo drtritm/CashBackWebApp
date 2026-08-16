@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "released": "2026-08-16",
-  "notes": "Cleaner billing icons, a quick-scan card list on Overview, filters you can see without swiping, and a more luxurious card design."
+  "notes": "Added Shinhan Bank My Life (3tr minimum spend to unlock 10% categories) and MB Bank JCB Platinum (2tr Shopee spend to unlock 10% Shopee cash back). New rule-level minimum-spend threshold, editable on any custom rule."
 }
