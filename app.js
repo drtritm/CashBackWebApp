@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.3.0";
+  const APP_VERSION = "1.4.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -87,6 +87,17 @@
      fixed order and never cycled — a 7th category folds into "Other". */
   const PIE_COLORS = ["#00a1e0", "#00886d", "#b27c00", "#b2392b", "#994ec9", "#e356a2"];
   const PIE_OTHER = "#5c6675";
+
+  /* Line icons for billing alerts — matches the tab bar's stroke style instead
+     of relying on emoji glyphs, which render inconsistently (some platforms show
+     them as a boxed placeholder that reads as a broken/error icon). */
+  const ICON_STATEMENT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg>';
+  const ICON_DUE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6.5" width="18" height="12" rx="2.2"/><path d="M3 10.5h18"/><circle cx="17" cy="14.7" r="1" fill="currentColor" stroke="none"/></svg>';
+  const alertIcon = (kind) => (kind === "due" ? ICON_DUE : ICON_STATEMENT);
+
+  /* Grouped like a real embossed card number — only the last 4 digits are ever
+     known, everything before them stays masked. */
+  const cardNumberDisplay = (last4) => (last4 ? `•••• •••• •••• ${esc(last4)}` : "•••• •••• •••• ••••");
   const GRADIENT_KEYS = Object.keys(GRADIENTS);
 
   // ---------------- state ----------------
@@ -791,7 +802,7 @@
     const alertsHtml = alerts.length
       ? `<div class="section-title">Upcoming</div>` + alerts.map((a) => `
         <div class="alert ${a.kind === "due" ? (a.n <= 5 ? "due-soon" : "") : (a.n <= 3 ? "close-soon" : "")}">
-          <div class="ic">${a.kind === "due" ? "💸" : "📄"}</div>
+          <div class="ic">${alertIcon(a.kind)}</div>
           <div class="body">
             <div class="t1">${esc(a.card.name)}</div>
             <div class="t2">${a.kind === "due" ? "Payment due" : "Statement closes"} · ${a.date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</div>
@@ -800,24 +811,21 @@
         </div>`).join("")
       : "";
 
+    // Compact rows, not full card art — with many cards this needs to scan in a
+    // glance, not scroll through a stack of full-size faces (that's what Cards is for).
     const cardsHtml = [...state.cards]
-      .sort((a, b) => cardTotals(b.id).cashback - cardTotals(a.id).cashback)
+      .sort((a, b) => cardTotals(b.id).monthCashback - cardTotals(a.id).monthCashback)
       .map((c) => {
         const t = cardTotals(c.id);
-        return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
-          <div class="cc-head">
-            <div>
-              ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
-              <div class="cc-name">${esc(c.name)}</div>
-            </div>
-            <div class="cc-chip"></div>
+        return `<div class="row card-mini" data-action="open-card" data-id="${c.id}">
+          <div class="cm-swatch" style="background:${gradCss(c.gradient)}"><span class="cm-chip"></span></div>
+          <div class="body">
+            <div class="t1">${esc(c.name)}</div>
+            <div class="t2">${c.issuer ? esc(c.issuer) + " · " : ""}${t.count} purchase${t.count === 1 ? "" : "s"}${c.last4 ? " · •• " + esc(c.last4) : ""}</div>
           </div>
-          <div class="cc-foot">
-            <div>
-              <div class="cc-k">Cash back earned</div>
-              <div class="cc-v num">${money(t.cashback)}</div>
-            </div>
-            <div class="cc-last4 num">${c.last4 ? "•••• " + esc(c.last4) : ""}</div>
+          <div class="tail">
+            <div class="a1 num" style="color:var(--mint)">+${money(t.monthCashback)}</div>
+            <div class="a2 num">${money(t.monthSpent)} spent</div>
           </div>
         </div>`;
       }).join("");
@@ -845,8 +853,8 @@
         <div class="stat"><div class="k">Cash spend · month</div><div class="v num">${money(mCash)}</div></div>
       </div>
       ${alertsHtml}
-      <div class="section-title">Cards <span class="link" data-action="goto-stats">See statistics ›</span></div>
-      <div class="card-stack">${cardsHtml}</div>
+      <div class="section-title">Cards <span class="link" data-action="goto-cards">See all ›</span></div>
+      ${cardsHtml}
     `;
   }
 
@@ -1297,6 +1305,7 @@
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
       return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
+        <div class="cc-holo"></div>
         <div class="cc-head">
           <div>
             ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
@@ -1305,6 +1314,7 @@
           <div class="cc-chip"></div>
         </div>
         <div class="cc-badge">up to ${best}%</div>
+        <div class="cc-number num">${cardNumberDisplay(c.last4)}</div>
         <div class="cc-foot">
           <div class="cc-stats">
             <div class="cc-stat">
@@ -1318,7 +1328,6 @@
           </div>
           <div class="cc-tail">
             <div class="cc-sub num">Lifetime ${money(t.cashback)} back · ${money(t.spent)} spent</div>
-            <div class="cc-last4 num">${c.last4 ? "•••• " + esc(c.last4) : ""}</div>
           </div>
         </div>
       </div>`;
@@ -1537,14 +1546,15 @@
 
     openSheet(`
       <div class="${ccClass(card.gradient)}" style="${gradStyle(card.gradient)};margin-bottom:18px;">
+        <div class="cc-holo"></div>
         <div class="cc-head">
           <div>${card.issuer ? `<div class="cc-issuer">${esc(card.issuer)}</div>` : ""}
           <div class="cc-name">${esc(card.name)}</div></div>
           <div class="cc-chip"></div>
         </div>
+        <div class="cc-number num">${cardNumberDisplay(card.last4)}</div>
         <div class="cc-foot">
           <div><div class="cc-k">Cash back earned</div><div class="cc-v num">${money(t.cashback)}</div></div>
-          <div class="cc-last4 num">${card.last4 ? "•••• " + esc(card.last4) : ""}</div>
         </div>
       </div>
 
@@ -1554,10 +1564,10 @@
       </div>
 
       ${(stmt || due) ? `<div class="section-title">Billing Cycle</div>
-        ${stmt ? `<div class="alert"><div class="ic">📄</div><div class="body"><div class="t1">Statement closes</div>
+        ${stmt ? `<div class="alert"><div class="ic">${ICON_STATEMENT}</div><div class="body"><div class="t1">Statement closes</div>
           <div class="t2">${stmt.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(stmt)}</div><div class="u">days</div></div></div>` : ""}
-        ${due ? `<div class="alert ${daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">💸</div><div class="body"><div class="t1">Payment due</div>
+        ${due ? `<div class="alert ${daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">${ICON_DUE}</div><div class="body"><div class="t1">Payment due</div>
           <div class="t2">${due.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(due)}</div><div class="u">days</div></div></div>` : ""}` : ""}
 
@@ -1773,7 +1783,9 @@
       view.innerHTML = '<div class="empty"><div class="ico">🧾</div>Nothing logged yet.<br>Add a purchase from <b>Log</b> or <b>Cash</b>.</div>';
       return;
     }
-    const chips = '<div class="chips">' +
+    // Wraps to as many rows as needed — every card stays reachable in one glance,
+    // no horizontal swipe required to find the right filter.
+    const chips = '<div class="chips chips-wrap">' +
       '<button class="chip ' + (histFilter === "all" ? "active" : "") + '" data-action="filter" data-id="all">All</button>' +
       state.cards.map((c) => '<button class="chip ' + (histFilter === c.id ? "active" : "") + '" data-action="filter" data-id="' + c.id + '">' + esc(c.name) + '</button>').join("") +
       '<button class="chip ' + (histFilter === "cash" ? "active" : "") + '" data-action="filter" data-id="cash">💵 Cash</button>' +
@@ -2290,6 +2302,8 @@
       openCashTxn(el.dataset.id);
     } else if (a === "goto-stats") {
       go("stats");
+    } else if (a === "goto-cards") {
+      go("cards");
     } else if (a === "stats-range") {
       statsRange = el.dataset.v;
       renderStats();

@@ -172,7 +172,10 @@ body::before {
 /* Fine engraved lines, the way a real card catches light. */
 .cc::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background-image: repeating-linear-gradient(112deg, rgba(255,255,255,0.030) 0 1px, transparent 1px 9px);
+  /* Engraved diagonal hatch plus a fine metal-grain texture, layered together. */
+  background-image:
+    repeating-linear-gradient(112deg, rgba(255,255,255,0.030) 0 1px, transparent 1px 9px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.05 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
   mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
   -webkit-mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
 }
@@ -183,9 +186,26 @@ body::before {
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.13) 45%, rgba(255,255,255,0.05) 60%, transparent);
   pointer-events: none;
 }
+/* Small holographic foil accent, the way a real premium card catches light. */
+.cc-holo {
+  position: absolute; top: 14px; right: 60px; width: 30px; height: 20px; border-radius: 4px;
+  background: linear-gradient(120deg, #ffb3d9, #b3d4ff, #fff3ad, #b3ffd6, #ffb3d9);
+  background-size: 320% 320%;
+  opacity: 0.30; mix-blend-mode: overlay; pointer-events: none;
+  transform: rotate(-6deg);
+  animation: holoShift 7s ease-in-out infinite;
+}
+@keyframes holoShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
 .cc-head { display: flex; align-items: flex-start; justify-content: space-between; position: relative; }
-.cc-issuer { font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.78; }
-.cc-name { font-size: 17px; font-weight: 690; letter-spacing: -0.018em; margin-top: 3px; }
+.cc-issuer { font-size: 11px; font-weight: 700; letter-spacing: 0.17em; text-transform: uppercase; opacity: 0.75; }
+.cc-name { font-size: 17.5px; font-weight: 700; letter-spacing: -0.015em; margin-top: 4px; }
+.cc-number {
+  font-size: 13.5px; font-weight: 600; letter-spacing: 0.12em; opacity: 0.68;
+  margin: 14px 0 2px; position: relative;
+}
 .cc-chip {
   width: 33px; height: 25px; border-radius: 6px; flex-shrink: 0;
   background: linear-gradient(140deg, #f6e3ae, #c9a55f 45%, #f3dfa8);
@@ -198,6 +218,7 @@ body::before {
   border-top: 1px solid rgba(0,0,0,0.14); border-bottom: 1px solid rgba(0,0,0,0.14);
 }
 .cc-foot { display: flex; flex-direction: column; gap: 9px; position: relative; }
+.cc-foot::before { content: ""; display: block; height: 1px; background: rgba(255,255,255,0.14); margin: 0 0 1px; }
 .cc-stats { display: flex; gap: 22px; }
 .cc-stat { min-width: 0; }
 .cc-k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.13em; opacity: 0.66; font-weight: 660; }
@@ -232,7 +253,8 @@ body::before {
 .cc.cc-light .cc-badge { background: rgba(0,0,0,0.08); color: #201f1c; }
 .cc.cc-light .cc-v.accent { color: #0e7a4f; }
 .cc.cc-light .cc-issuer, .cc.cc-light .cc-k, .cc.cc-light .cc-sub { opacity: 0.55; }
-.cc.cc-light .cc-last4 { opacity: 0.62; }
+.cc.cc-light .cc-last4, .cc.cc-light .cc-number { opacity: 0.5; }
+.cc.cc-light .cc-foot::before { background: rgba(0,0,0,0.12); }
 .cc.cc-light .cc-chip {
   background: linear-gradient(140deg, #d9b968, #a9822f 45%, #d6b562);
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.22);
@@ -384,6 +406,20 @@ body::before {
 
 .cash-grid { grid-template-columns: 1fr 1fr; }
 
+/* Overview's compact card rows — a quick scan when there are many cards,
+   full luxury card art lives on the Cards tab instead. */
+.card-mini .cm-swatch {
+  width: 46px; height: 32px; border-radius: 9px; flex-shrink: 0; position: relative;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16), 0 3px 8px rgba(0,0,0,0.35);
+}
+.card-mini .cm-chip {
+  position: absolute; right: 5px; bottom: 5px; width: 10px; height: 7px; border-radius: 2px;
+  background: linear-gradient(140deg, #f0dcae, #b6923f 60%, #eed9a4);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
+}
+.card-mini .tail .a1 { font-size: 15px; font-weight: 720; }
+.card-mini .tail .a2 { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+
 /* ---------- alerts (billing cycle) ---------- */
 .alert {
   display: flex; align-items: center; gap: 13px;
@@ -392,7 +428,14 @@ body::before {
 }
 .alert.due-soon { background: var(--rose-soft); border-color: rgba(255,107,129,0.28); }
 .alert.close-soon { background: var(--amber-soft); border-color: rgba(245,181,68,0.26); }
-.alert .ic { width: 36px; height: 36px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 16px; background: rgba(0,0,0,0.22); flex-shrink: 0; }
+.alert .ic {
+  width: 36px; height: 36px; border-radius: 11px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.06); color: var(--text-2);
+}
+.alert .ic svg { width: 18px; height: 18px; }
+.alert.due-soon .ic { background: rgba(255,107,129,0.16); color: var(--rose); }
+.alert.close-soon .ic { background: rgba(245,181,68,0.16); color: var(--amber); }
 .alert .body { flex: 1; min-width: 0; }
 .alert .t1 { font-size: 14.5px; font-weight: 650; }
 .alert .t2 { font-size: 12.5px; color: var(--text-2); margin-top: 2px; }
@@ -520,6 +563,8 @@ input::placeholder { color: var(--text-3); }
 /* chips */
 .chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 6px; margin-bottom: 6px; scrollbar-width: none; }
 .chips::-webkit-scrollbar { display: none; }
+/* Every filter reachable without a swipe — wraps instead of scrolling sideways. */
+.chips.chips-wrap { flex-wrap: wrap; overflow-x: visible; }
 .chip {
   flex-shrink: 0; padding: 8px 15px; border-radius: 999px; font-size: 13px; font-weight: 640;
   background: var(--surface); border: 1px solid var(--hairline-soft); color: var(--text-2);

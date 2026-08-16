@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "released": "2026-08-16",
-  "notes": "New Statistics tab with pie charts, cash spending tracking, day-by-day activity, and total spend on the Overview."
+  "notes": "Cleaner billing icons, a quick-scan card list on Overview, filters you can see without swiping, and a more luxurious card design."
 }
