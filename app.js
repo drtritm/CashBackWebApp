@@ -7,23 +7,42 @@
   // Deep, desaturated finishes — white text must stay legible over the lighter stop.
   const GRADIENTS = {
     obsidian:  ["#262a33", "#0b0e13"],
-    midnight:  ["#172c46", "#080f18"],
-    sapphire:  ["#20406f", "#0c1526"],
-    emerald:   ["#146049", "#06201a"],
-    teal:      ["#14555c", "#061e21"],
-    amethyst:  ["#553281", "#1b0c30"],
-    crimson:   ["#8a2230", "#2a0a10"],
-    rose:      ["#8c3563", "#2c0d24"],
-    gold:      ["#8a6b34", "#2f2210"],
-    bronze:    ["#6f471f", "#241408"],
+    graphite:  ["#3a4048", "#14171b"],
     slate:     ["#454e60", "#161a22"],
-    forest:    ["#2f5430", "#0e180f"]
+    midnight:  ["#172c46", "#080f18"],
+    navy:      ["#1b3a6b", "#08122a"],
+    sapphire:  ["#20406f", "#0c1526"],
+    azure:     ["#1d5a8a", "#071c2e"],
+    cobalt:    ["#2b3f8f", "#0d1233"],
+    teal:      ["#14555c", "#061e21"],
+    lagoon:    ["#116b6b", "#052424"],
+    emerald:   ["#146049", "#06201a"],
+    jade:      ["#18715a", "#062620"],
+    forest:    ["#2f5430", "#0e180f"],
+    olive:     ["#4e5a25", "#171c09"],
+    amethyst:  ["#553281", "#1b0c30"],
+    violet:    ["#43308c", "#120c2e"],
+    orchid:    ["#6c3579", "#240f2a"],
+    plum:      ["#5d2a4a", "#1e0c17"],
+    rose:      ["#8c3563", "#2c0d24"],
+    ruby:      ["#8f2748", "#2c0a17"],
+    crimson:   ["#8a2230", "#2a0a10"],
+    ember:     ["#93412a", "#2c110a"],
+    amber:     ["#8a5f1e", "#2b1c06"],
+    bronze:    ["#6f471f", "#241408"],
+    gold:      ["#8a6b34", "#2f2210"],
+    champagne: ["#7d6a4a", "#282116"],
+    steel:     ["#3f5563", "#121a20"],
+    ink:       ["#2c2f4a", "#0d0e1a"]
   };
   const GRADIENT_KEYS = Object.keys(GRADIENTS);
 
   // ---------------- state ----------------
   function blank() {
-    return { cards: [], transactions: [], settings: { recentMccs: [], notify: false, notifyDays: 3 } };
+    return {
+      cards: [], transactions: [],
+      settings: { recentMccs: [], notify: false, notifyDays: 3, autoBackup: true, lastSnapshotDate: null, lastSavedDate: null }
+    };
   }
 
   function migrateLegacy() {
@@ -79,6 +98,86 @@
   let state = load();
   function save() {
     localStorage.setItem(KEY, JSON.stringify(state));
+  }
+
+  // ---------------- automatic daily backup ----------------
+  /* Snapshots live under their own key so they never nest inside the data they
+     copy. A browser cannot write a file to disk on a timer — that needs a user
+     gesture — so the automatic half is this on-device rolling snapshot, and the
+     app separately offers a once-a-day one-tap save to Files. */
+  const BACKUP_KEY = "cashbackTracker_snapshots";
+  const MAX_SNAPSHOTS = 10;
+
+  function loadSnapshots() {
+    try {
+      const raw = localStorage.getItem(BACKUP_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+  function writeSnapshots(list) {
+    try {
+      localStorage.setItem(BACKUP_KEY, JSON.stringify(list));
+      return true;
+    } catch (e) {
+      // Quota exceeded — drop the oldest and retry once.
+      try {
+        localStorage.setItem(BACKUP_KEY, JSON.stringify(list.slice(0, Math.max(1, list.length - 3))));
+        return true;
+      } catch (e2) { return false; }
+    }
+  }
+
+  function takeSnapshot(reason) {
+    const list = loadSnapshots();
+    const payload = JSON.stringify({ cards: state.cards, transactions: state.transactions });
+    // Skip if nothing actually changed since the newest snapshot.
+    if (list.length && list[0].payload === payload) {
+      list[0].date = todayStr();
+      writeSnapshots(list);
+      return false;
+    }
+    list.unshift({
+      at: new Date().toISOString(),
+      date: todayStr(),
+      reason: reason || "daily",
+      cards: state.cards.length,
+      txns: state.transactions.length,
+      payload
+    });
+    writeSnapshots(list.slice(0, MAX_SNAPSHOTS));
+    return true;
+  }
+
+  function runDailyBackup() {
+    if (!state.settings.autoBackup) return;
+    if (state.settings.lastSnapshotDate === todayStr()) return;
+    if (!state.cards.length && !state.transactions.length) return;
+    takeSnapshot("daily");
+    state.settings.lastSnapshotDate = todayStr();
+    save();
+  }
+
+  /* iOS PWAs handle <a download> poorly; the share sheet is the reliable way to
+     get a file into Files / iCloud / email from a home-screen app. */
+  async function saveBackupFile() {
+    const json = JSON.stringify({ cards: state.cards, transactions: state.transactions, settings: state.settings }, null, 2);
+    const name = `cashback-backup-${todayStr()}.json`;
+    try {
+      const file = new File([json], name, { type: "application/json" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Cashback backup" });
+        state.settings.lastSavedDate = todayStr();
+        save();
+        return "shared";
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled";
+    }
+    download(name, json, "application/json");
+    state.settings.lastSavedDate = todayStr();
+    save();
+    return "downloaded";
   }
 
   // ---------------- helpers ----------------
@@ -197,6 +296,19 @@
     if (rule.label) return rule.label;
     if (rule.kind === "group") return groupName(rule.groupId);
     return (rule.mccCodes || []).map((c) => mccInfo(c).name).join(", ") || "Custom";
+  }
+
+  /* Transactions store an MCC, but the Log screen offers plain categories.
+     This picks the code that will match the chosen rule in the engine. */
+  function ruleMcc(rule) {
+    if (!rule) return "0000";
+    if (rule.kind === "mcc") return (rule.mccCodes || [])[0] || "0000";
+    const g = MCC_GROUPS.find((x) => x.id === rule.groupId);
+    return g ? g.codes[0][0] : "0000";
+  }
+  function ruleIcon(rule) {
+    if (!rule) return "•";
+    return rule.kind === "group" ? groupIcon(rule.groupId) : mccInfo(ruleMcc(rule)).icon;
   }
 
   /* Cash back is always DERIVED from raw transactions, never stored as truth.
@@ -328,7 +440,7 @@
   function renderHome() {
     if (!state.cards.length) {
       view.innerHTML = `<div class="empty"><div class="ico">💳</div>
-        No cards yet.<br>Open <b>Cards</b> and add your first credit card,<br>then define its MCC bonus rules.</div>`;
+        No cards yet.<br>Open <b>Cards</b> → <b>Add Card</b> and pick your bank<br>to load its cash back categories automatically.</div>`;
       return;
     }
     const total = state.transactions.reduce((s, t) => s + t._cb, 0);
@@ -429,10 +541,21 @@
       return;
     }
     if (!draft.cardId || !getCard(draft.cardId)) draft.cardId = state.cards[0].id;
-    if (!draft.mcc) draft.mcc = state.settings.recentMccs[0] || "5812";
     if (!draft.date) draft.date = todayStr();
 
-    const info = mccInfo(draft.mcc);
+    const card = getCard(draft.cardId);
+    // Offer only the categories this card actually pays on, plus a no-bonus catch-all.
+    const cats = card.rules.map((r) => ({ key: r.id, mcc: ruleMcc(r), icon: ruleIcon(r), name: ruleLabel(r), rate: r.rate }));
+    // Only pick a default when nothing is chosen yet. The category belongs to the
+    // purchase, so switching cards must keep it — that's what makes comparing cards useful.
+    if (!draft.mcc) {
+      draft.mcc = cats.length ? cats.reduce((a, b) => (b.rate > a.rate ? b : a)).mcc : "0000";
+    }
+    const isOther = !cats.some((c) => c.mcc === draft.mcc);
+    // An exact-MCC pick that earns no bonus still deserves its real name on the tile.
+    const otherLabel = isOther && draft.mcc !== "0000" ? mccInfo(draft.mcc).name : "Other";
+    const otherIcon = isOther && draft.mcc !== "0000" ? mccInfo(draft.mcc).icon : "•";
+
     view.innerHTML = `
       <div class="panel">
         <div class="field">
@@ -443,26 +566,33 @@
           </div>
         </div>
         <div class="field">
-          <label>Merchant Category (MCC)</label>
-          <button class="picker-btn" id="mccPick" type="button">
-            <span class="glyph">${info.icon}</span>
-            <span class="body">
-              <span class="t1">${esc(info.name)}</span>
-              <span class="t2">MCC ${esc(info.code)} · ${esc(info.groupName)}</span>
-            </span>
-            <span class="chev">›</span>
-          </button>
-        </div>
-        <div class="field">
           <label>Card</label>
           <select id="f_card">
             ${state.cards.map((c) => `<option value="${c.id}" ${c.id === draft.cardId ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
           </select>
         </div>
+        <div class="field">
+          <label>Category</label>
+          <div class="cat-grid">
+            ${cats.map((c) => `
+              <button type="button" class="cat-tile ${c.mcc === draft.mcc ? "sel" : ""}" data-pickmcc="${esc(c.mcc)}">
+                <span class="ci">${c.icon}</span>
+                <span class="cn">${esc(c.name)}</span>
+                <span class="cr">${c.rate}%</span>
+              </button>`).join("")}
+            <button type="button" class="cat-tile other ${isOther ? "sel" : ""}" data-pickmcc="${isOther ? esc(draft.mcc) : "0000"}">
+              <span class="ci">${otherIcon}</span>
+              <span class="cn">${esc(otherLabel)}</span>
+              <span class="cr">${card.baseRate > 0 ? card.baseRate + "%" : "no cash back"}</span>
+            </button>
+          </div>
+          ${cats.length ? "" : `<div class="hint" style="margin-top:10px;">This card has no cash back categories yet. Open <b>Cards</b> → this card → <b>Add rule</b>.</div>`}
+        </div>
         <div class="row-2">
           <div class="field"><label>Date</label><input id="f_date" type="date" value="${draft.date}" /></div>
           <div class="field"><label>Note</label><input id="f_note" type="text" placeholder="Optional" value="${esc(draft.note)}" /></div>
         </div>
+        <button type="button" class="btn btn-ghost" id="mccPick" style="margin-top:2px;font-size:13px;">Pick an exact MCC instead ›</button>
       </div>
       <div id="pv"></div>
       <button class="btn btn-primary" id="saveTxn">Add Purchase</button>
@@ -490,7 +620,9 @@
       const cls = q.capped ? "capped" : q.rule ? "" : "base";
       let note;
       if (!q.rule) {
-        note = `No bonus rule matches MCC ${draft.mcc} on this card — earning the ${q.rate}% base rate.`;
+        note = q.rate > 0
+          ? `No cash back category on this card matches — earning the ${q.rate}% base rate.`
+          : `This card pays no cash back on this category.`;
       } else if (q.capped) {
         note = `Cap reached on <b>${esc(ruleLabel(q.rule))}</b>. Part of this purchase earns ${q.rate}%, the rest drops to the ${q.baseRate}% base rate.`;
       } else {
@@ -506,9 +638,17 @@
 
     wireMoneyInput(amtEl);
     amtEl.addEventListener("input", sync);
-    cardEl.addEventListener("change", sync);
+    // Switching card changes which categories exist, so re-render rather than just re-preview.
+    cardEl.addEventListener("change", () => { draft.amount = amtEl.value; draft.note = noteEl.value; draft.cardId = cardEl.value; renderLog(); });
     dateEl.addEventListener("change", sync);
     noteEl.addEventListener("input", sync);
+    view.querySelectorAll("[data-pickmcc]").forEach((b) => {
+      b.addEventListener("click", () => {
+        draft.amount = amtEl.value; draft.note = noteEl.value; draft.date = dateEl.value || todayStr();
+        draft.mcc = b.dataset.pickmcc;
+        renderLog();
+      });
+    });
     document.getElementById("mccPick").addEventListener("click", () => openMccPicker((code) => { draft.mcc = code; renderLog(); }));
     document.getElementById("bestCard").addEventListener("click", showBestCard);
     document.getElementById("saveTxn").addEventListener("click", () => {
@@ -520,6 +660,8 @@
       recents.unshift(draft.mcc);
       state.settings.recentMccs = recents.slice(0, 8);
       save(); recompute();
+      // Covers day one: the load-time check skips while there's no data to protect.
+      runDailyBackup();
       const t = state.transactions[state.transactions.length - 1];
       toast(`+${money(t._cb)} cash back`);
       draft.amount = ""; draft.note = "";
@@ -619,7 +761,24 @@
       view.innerHTML = `<div class="empty"><div class="ico">💳</div>No cards yet.<br>Tap <b>Add</b> in the top right.</div>`;
       return;
     }
-    view.innerHTML = `<div class="card-stack">${state.cards.map((c) => {
+    const mk = todayStr().slice(0, 7);
+    const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
+    const monthCb = mTx.reduce((s, t) => s + t._cb, 0);
+    const monthSp = mTx.reduce((s, t) => s + t.amount, 0);
+    const lifetimeCb = state.transactions.reduce((s, t) => s + t._cb, 0);
+
+    view.innerHTML = `
+      <div class="hero" style="padding:20px;">
+        <div class="label">All cards · ${monthLabel(mk)}</div>
+        <div class="big num">${money(monthCb)}</div>
+        <div class="sub">
+          <div class="item"><div class="k">Spent</div><div class="v num">${moneyShort(monthSp)}</div></div>
+          <div class="item"><div class="k">Purchases</div><div class="v num">${mTx.length}</div></div>
+          <div class="item"><div class="k">Lifetime</div><div class="v num">${moneyShort(lifetimeCb)}</div></div>
+        </div>
+      </div>
+      <div class="section-title">Your Cards</div>
+      <div class="card-stack">${state.cards.map((c) => {
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
       return `<div class="cc" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
@@ -632,8 +791,11 @@
         </div>
         <div class="cc-badge">up to ${best}%</div>
         <div class="cc-foot">
-          <div><div class="cc-k">${c.rules.length} rule${c.rules.length === 1 ? "" : "s"} · base ${c.baseRate}%</div>
-          <div class="cc-v num">${money(t.cashback)}</div></div>
+          <div>
+            <div class="cc-k">This month</div>
+            <div class="cc-v num">${money(t.monthCashback)}</div>
+            <div class="cc-sub num">Lifetime ${money(t.cashback)}</div>
+          </div>
           <div class="cc-last4 num">${c.last4 ? "•••• " + esc(c.last4) : ""}</div>
         </div>
       </div>`;
@@ -655,47 +817,141 @@
   }
   const pickedGrad = () => (document.querySelector("#gradPick .swatch.sel") || {}).dataset?.grad || GRADIENT_KEYS[0];
 
-  function cardFormFields(c) {
+  /* showBase is off while adding a card — the base rate confuses the first-run
+     flow and templates set it. It stays available when editing a card. */
+  function cardFormFields(c, opts) {
     c = c || {};
+    opts = opts || {};
     return `
-      <div class="field"><label>Card Name</label><input id="c_name" type="text" placeholder="Freedom Unlimited" value="${esc(c.name || "")}" /></div>
+      <div class="field"><label>Card Name</label><input id="c_name" type="text" placeholder="Visa Platinum" value="${esc(c.name || "")}" /></div>
       <div class="row-2">
-        <div class="field"><label>Issuer</label><input id="c_issuer" type="text" placeholder="Chase" value="${esc(c.issuer || "")}" /></div>
+        <div class="field"><label>Bank</label><input id="c_issuer" type="text" placeholder="Vietcombank" value="${esc(c.issuer || "")}" /></div>
         <div class="field"><label>Last 4</label><input id="c_last4" type="text" inputmode="numeric" maxlength="4" placeholder="4821" value="${esc(c.last4 || "")}" /></div>
       </div>
-      <div class="field"><label>Base Rate — everything else (%)</label><input id="c_base" type="number" step="0.01" min="0" value="${c.baseRate != null ? c.baseRate : 1}" /></div>
       <div class="row-2">
         <div class="field"><label>Statement Closes (day)</label><input id="c_stmt" type="number" min="1" max="31" placeholder="e.g. 18" value="${c.statementDay || ""}" /></div>
         <div class="field"><label>Payment Due (day)</label><input id="c_due" type="number" min="1" max="31" placeholder="e.g. 15" value="${c.dueDay || ""}" /></div>
       </div>
       <div class="hint">Day of the month, 1–31. Used for the reminders on your Overview screen.</div>
-      <div class="field"><label>Card Finish</label>${swatchesHtml(c.gradient || GRADIENT_KEYS[state.cards.length % GRADIENT_KEYS.length])}</div>
+      ${opts.showBase ? `
+        <div class="field">
+          <label>Base Rate — everything else (%)</label>
+          <input id="c_base" type="number" step="0.01" min="0" value="${c.baseRate != null ? c.baseRate : 0}" />
+        </div>
+        <div class="hint">Leave at 0 if the card only pays on its bonus categories.</div>
+      ` : ""}
+      <div class="field"><label>Card Colour</label>${swatchesHtml(c.gradient || GRADIENT_KEYS[state.cards.length % GRADIENT_KEYS.length])}</div>
     `;
   }
-  function readCardForm() {
+  function readCardForm(existing) {
+    const baseEl = document.getElementById("c_base");
     return {
       name: document.getElementById("c_name").value.trim(),
       issuer: document.getElementById("c_issuer").value.trim(),
       last4: document.getElementById("c_last4").value.trim().slice(0, 4),
-      baseRate: parseFloat(document.getElementById("c_base").value) || 0,
+      baseRate: baseEl ? (parseFloat(baseEl.value) || 0) : ((existing && existing.baseRate) || 0),
       statementDay: parseInt(document.getElementById("c_stmt").value, 10) || null,
       dueDay: parseInt(document.getElementById("c_due").value, 10) || null,
       gradient: pickedGrad()
     };
   }
 
+  // ---------------- add card: bank → product → details ----------------
   function openAddCard() {
-    openSheet(`<h2>Add Card</h2><div class="sheet-sub">You can add bonus rules right after.</div>
-      ${cardFormFields()}
+    function bankList(q) {
+      q = (q || "").trim().toLowerCase();
+      const hits = VN_BANKS.filter((b) => !q || b.name.toLowerCase().includes(q) ||
+        b.cards.some((c) => c[0].toLowerCase().includes(q)));
+      if (!hits.length) return `<div class="empty">No bank matches that search.</div>`;
+      return hits.map((b) => `
+        <div class="row" data-bank="${b.id}">
+          <div class="glyph" style="background:linear-gradient(140deg,${grad(b.grad)[0]},${grad(b.grad)[1]});border:none;font-size:13px;font-weight:700;">${esc(b.name.slice(0, 2).toUpperCase())}</div>
+          <div class="body"><div class="t1">${esc(b.name)}</div><div class="t2">${b.cards.length} card${b.cards.length === 1 ? "" : "s"}</div></div>
+          <div class="chev" style="color:var(--text-3);font-size:19px;">›</div>
+        </div>`).join("");
+    }
+
+    openSheet(`
+      <h2>Choose your bank</h2>
+      <div class="sheet-sub">Pick a card to prefill its cash back categories, or build one from scratch.</div>
+      <div class="sticky-search"><input id="bankSearch" type="search" placeholder="Search bank or card" autocomplete="off" /></div>
+      <div id="bankList">${bankList("")}</div>
+      <button class="btn btn-secondary" id="blankCard" style="margin-top:14px;">Build a card from scratch</button>
+    `);
+    const listEl = document.getElementById("bankList");
+    const searchEl = document.getElementById("bankSearch");
+    searchEl.addEventListener("input", () => { listEl.innerHTML = bankList(searchEl.value); });
+    listEl.addEventListener("click", (e) => {
+      const row = e.target.closest("[data-bank]");
+      if (row) openBankCards(row.dataset.bank);
+    });
+    document.getElementById("blankCard").addEventListener("click", () => openCardDetailsForm(null, null, null));
+  }
+
+  function openBankCards(bankId) {
+    const bank = VN_BANKS.find((b) => b.id === bankId);
+    if (!bank) return;
+    openSheet(`
+      <h2>${esc(bank.name)}</h2>
+      <div class="sheet-sub">Templates are starting points — check your card's real terms and edit the rates after.</div>
+      ${bank.cards.map(([name, tpl], i) => {
+        const t = tpl ? CARD_TEMPLATES[tpl] : null;
+        const preview = t ? t.rules.map((r) => `${groupName(r.g)} ${r.rate}%`).join(" · ") : "No rules — add your own";
+        return `<div class="row" data-cardidx="${i}">
+          <div class="glyph">${t ? groupIcon(t.rules[0].g) : "✎"}</div>
+          <div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(preview)}</div></div>
+          <div class="chev" style="color:var(--text-3);font-size:19px;">›</div>
+        </div>`;
+      }).join("")}
+      <button class="btn btn-ghost" id="backBanks">‹ Back to banks</button>
+    `);
+    document.getElementById("backBanks").addEventListener("click", openAddCard);
+    sheetEl.addEventListener("click", function onPick(e) {
+      const row = e.target.closest("[data-cardidx]");
+      if (!row) return;
+      sheetEl.removeEventListener("click", onPick);
+      const [name, tpl] = bank.cards[Number(row.dataset.cardidx)];
+      openCardDetailsForm(bank, name, tpl);
+    });
+  }
+
+  function openCardDetailsForm(bank, cardName, tplId) {
+    // Keep cards visually distinct: if the bank's house colour is already on another
+    // card, offer the next unused one instead.
+    const used = new Set(state.cards.map((c) => c.gradient));
+    let gradient = bank ? bank.grad : GRADIENT_KEYS[state.cards.length % GRADIENT_KEYS.length];
+    if (used.has(gradient)) {
+      gradient = GRADIENT_KEYS.find((k) => !used.has(k)) || gradient;
+    }
+    const seed = {
+      name: cardName || "",
+      issuer: bank ? (bank.id === "custom" ? "" : bank.name) : "",
+      gradient
+    };
+    const tpl = tplId ? CARD_TEMPLATES[tplId] : null;
+    openSheet(`
+      <h2>Card details</h2>
+      <div class="sheet-sub">${tpl ? "Cash back categories will be prefilled — edit them any time." : "You can add cash back categories next."}</div>
+      ${cardFormFields(seed, { showBase: false })}
+      ${tpl ? `<div class="section-title">Prefilled categories</div>
+        ${tpl.rules.map((r) => `<div class="row"><div class="glyph">${groupIcon(r.g)}</div>
+          <div class="body"><div class="t1">${esc(groupName(r.g))}</div>
+          <div class="t2">${r.cap ? "Cap " + money(r.cap[0]) + " / " + PERIOD_LABEL[r.cap[2]] : "No cap"}</div></div>
+          <div class="tail"><div class="a1" style="color:var(--gold);">${r.rate}%</div></div></div>`).join("")}
+        <div class="hint">These are typical values, not confirmed terms from your bank. Verify and adjust after adding.</div>` : ""}
       <button class="btn btn-primary" id="doAdd">Add Card</button>
-      <button class="btn btn-ghost" data-action="close-sheet">Cancel</button>`);
+      <button class="btn btn-ghost" id="backBanks2">‹ Back</button>
+    `);
     wireSwatches();
+    document.getElementById("backBanks2").addEventListener("click", () => (bank ? openBankCards(bank.id) : openAddCard()));
     document.getElementById("doAdd").addEventListener("click", () => {
       const f = readCardForm();
       if (!f.name) { toast("Give the card a name"); return; }
-      const card = Object.assign({ id: uid(), rules: [] }, f);
+      const built = tplId ? buildTemplateRules(tplId, uid) : { baseRate: 0, rules: [] };
+      const card = Object.assign({ id: uid(), rules: built.rules }, f, { baseRate: built.baseRate });
       state.cards.push(card);
       save();
+      takeSnapshot("card-added");
       toast("Card added");
       render();
       openCardDetail(card.id);
@@ -766,7 +1022,7 @@
 
       <div class="divider"></div>
       <div class="section-title" style="margin-top:0;">Card Settings</div>
-      ${cardFormFields(card)}
+      ${cardFormFields(card, { showBase: true })}
       <button class="btn btn-primary" data-action="save-card" data-id="${card.id}">Save Changes</button>
       <button class="btn btn-danger" data-action="delete-card" data-id="${card.id}">Delete Card</button>
       <button class="btn btn-ghost" data-action="close-sheet">Close</button>
@@ -1028,6 +1284,7 @@
   // ================= MORE / SETTINGS =================
   function renderMore() {
     const totalCb = state.transactions.reduce((s, t) => s + t._cb, 0);
+    const snaps = loadSnapshots();
     view.innerHTML = `
       <div class="panel">
         <div class="stat-2">
@@ -1044,13 +1301,30 @@
         <button class="btn btn-secondary" data-action="enable-notif">Enable In-App Notifications</button>
       </div>
 
-      <div class="section-title">Backup</div>
+      <div class="section-title">Automatic Backup</div>
       <div class="panel">
-        <div class="hint" style="margin:0 0 14px;">Everything lives only on this device. Export regularly so you don't lose history if you reinstall.</div>
-        <button class="btn btn-secondary" data-action="export">Export Backup (JSON)</button>
-        <label class="btn btn-secondary" style="margin-top:10px;">Import Backup
+        <label class="toggle-row">
+          <span>
+            <span class="tr-t1">Daily auto-backup</span>
+            <span class="tr-t2">Saves a snapshot on this device once a day</span>
+          </span>
+          <input type="checkbox" id="autoBackupToggle" ${state.settings.autoBackup ? "checked" : ""} />
+        </label>
+        <div class="hint" style="margin:12px 0 14px;">
+          A browser can't write files to your phone on a timer — that always needs a tap.
+          So the app keeps ${MAX_SNAPSHOTS} rolling snapshots on-device automatically, and you save a
+          real file to Files with one tap below.
+        </div>
+        <button class="btn btn-primary" data-action="save-file">Save Backup File Now</button>
+        <button class="btn btn-secondary" data-action="view-snapshots" style="margin-top:10px;">
+          Restore a Snapshot (${snaps.length})
+        </button>
+        <label class="btn btn-secondary" style="margin-top:10px;">Import Backup File
           <input type="file" id="importFile" accept="application/json,.json" hidden />
         </label>
+        <div class="hint" style="margin:12px 0 0;text-align:center;">
+          ${state.settings.lastSavedDate ? "Last file saved " + esc(state.settings.lastSavedDate) : "No backup file saved yet"}
+        </div>
       </div>
 
       <div class="section-title">Danger Zone</div>
@@ -1058,6 +1332,32 @@
       <div class="hint" style="text-align:center;margin-top:20px;">Cashback Tracker · data stored locally on this device</div>
     `;
     document.getElementById("importFile").addEventListener("change", onImport);
+    document.getElementById("autoBackupToggle").addEventListener("change", (e) => {
+      state.settings.autoBackup = e.target.checked;
+      save();
+      toast(e.target.checked ? "Auto-backup on" : "Auto-backup off");
+      if (e.target.checked) runDailyBackup();
+    });
+  }
+
+  function openSnapshots() {
+    const snaps = loadSnapshots();
+    openSheet(`
+      <h2>Snapshots</h2>
+      <div class="sheet-sub">Automatic on-device copies. Restoring replaces your current data.</div>
+      ${snaps.length ? snaps.map((s, i) => {
+        const d = new Date(s.at);
+        return `<div class="row">
+          <div class="glyph">🗂️</div>
+          <div class="body">
+            <div class="t1">${d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })} ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</div>
+            <div class="t2">${s.cards} card${s.cards === 1 ? "" : "s"} · ${s.txns} purchase${s.txns === 1 ? "" : "s"} · ${esc(s.reason || "daily")}</div>
+          </div>
+          <button class="chip" data-action="restore-snap" data-idx="${i}">Restore</button>
+        </div>`;
+      }).join("") : `<div class="empty">No snapshots yet.<br>One is taken automatically each day you use the app.</div>`}
+      <button class="btn btn-ghost" data-action="close-sheet">Close</button>
+    `);
   }
 
   function download(filename, text, mime) {
@@ -1166,7 +1466,7 @@
     else if (a === "filter") { histFilter = el.dataset.id; render(); }
     else if (a === "save-card") {
       const c = getCard(el.dataset.id);
-      const f = readCardForm();
+      const f = readCardForm(c);
       if (!f.name) { toast("Give the card a name"); return; }
       Object.assign(c, f);
       save(); closeSheet(); toast("Card saved"); render();
@@ -1178,6 +1478,26 @@
     } else if (a === "export") {
       download(`cashback-backup-${todayStr()}.json`, JSON.stringify(state, null, 2), "application/json");
       toast("Backup exported");
+    } else if (a === "save-file") {
+      saveBackupFile().then((r) => {
+        if (r === "cancelled") return;
+        toast(r === "shared" ? "Backup shared" : "Backup downloaded");
+        render();
+      });
+    } else if (a === "view-snapshots") {
+      openSnapshots();
+    } else if (a === "restore-snap") {
+      const snaps = loadSnapshots();
+      const s = snaps[Number(el.dataset.idx)];
+      if (!s) return;
+      if (!confirm(`Restore the snapshot from ${new Date(s.at).toLocaleString()}? Your current data will be replaced.`)) return;
+      try {
+        const d = JSON.parse(s.payload);
+        takeSnapshot("before-restore");
+        state.cards = d.cards || [];
+        state.transactions = d.transactions || [];
+        save(); closeSheet(); toast("Snapshot restored"); render();
+      } catch (err) { alert("That snapshot is unreadable."); }
     } else if (a === "export-ics") exportIcs();
     else if (a === "enable-notif") enableNotifications();
     else if (a === "wipe") {
@@ -1191,8 +1511,13 @@
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
   }
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkReminders(false); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    runDailyBackup();
+    checkReminders(false);
+  });
 
+  runDailyBackup();
   go("home");
   setTimeout(() => checkReminders(false), 1200);
 })();

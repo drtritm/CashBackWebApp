@@ -181,6 +181,7 @@ body::before {
 .cc-foot { display: flex; align-items: flex-end; justify-content: space-between; position: relative; }
 .cc-k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.13em; opacity: 0.66; font-weight: 660; }
 .cc-v { font-size: 22px; font-weight: 720; letter-spacing: -0.03em; margin-top: 2px; }
+.cc-sub { font-size: 11px; font-weight: 600; opacity: 0.62; margin-top: 3px; }
 .cc-last4 { font-size: 13px; font-weight: 620; letter-spacing: 0.09em; opacity: 0.82; }
 .cc-badge {
   position: absolute; top: 0; right: 0;
@@ -290,6 +291,43 @@ input::placeholder { color: var(--text-3); }
 .picker-btn .t1 { display: block; font-size: 15px; font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-btn .t2 { display: block; font-size: 12px; color: var(--text-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-btn .chev { color: var(--text-3); font-size: 19px; }
+
+/* category tiles on the Log screen — only the card's paying categories */
+.cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.cat-tile {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 12px 13px; border-radius: 14px; font-family: inherit; text-align: left;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--hairline); color: var(--text);
+  transition: border-color 0.16s var(--ease), background 0.16s var(--ease), transform 0.14s var(--ease);
+}
+.cat-tile:active { transform: scale(0.975); }
+.cat-tile .ci { font-size: 19px; line-height: 1.1; }
+.cat-tile .cn {
+  font-size: 13.5px; font-weight: 640; margin-top: 3px; line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.cat-tile .cr { font-size: 12.5px; font-weight: 730; color: var(--gold); margin-top: 2px; }
+.cat-tile.sel { background: var(--gold-soft); border-color: rgba(217,183,121,0.55); }
+.cat-tile.other .cr { color: var(--text-3); font-weight: 640; }
+.cat-tile.other.sel { background: var(--surface-2); border-color: var(--hairline); }
+
+/* settings toggle */
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.toggle-row .tr-t1 { display: block; font-size: 15px; font-weight: 640; }
+.toggle-row .tr-t2 { display: block; font-size: 12.5px; color: var(--text-3); margin-top: 3px; }
+.toggle-row input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 50px; height: 30px; border-radius: 999px; flex-shrink: 0; padding: 0;
+  background: rgba(255,255,255,0.12); border: 1px solid var(--hairline);
+  position: relative; transition: background 0.22s var(--ease);
+}
+.toggle-row input[type="checkbox"]::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 24px; height: 24px; border-radius: 50%; background: #fff;
+  transition: transform 0.22s var(--ease);
+}
+.toggle-row input[type="checkbox"]:checked { background: var(--mint); border-color: var(--mint); }
+.toggle-row input[type="checkbox"]:checked::after { transform: translateX(20px); }
 
 /* preview of computed cash back */
 .preview {
