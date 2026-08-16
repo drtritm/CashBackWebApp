@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.2.0";
+  const APP_VERSION = "1.3.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -48,6 +48,45 @@
   const LIGHT_GRADIENTS = new Set(["platinum"]);
   const isLightGradient = (key) => LIGHT_GRADIENTS.has(key);
   const ccClass = (key) => "cc" + (isLightGradient(key) ? " cc-light" : "");
+
+  /* Cash spending categories. Each maps onto an MCC group so cash and card
+     purchases land in the same buckets in the statistics. */
+  const CASH_CATEGORIES = [
+    { id: "food", name: "Food & Drink", icon: "🍜", group: "dining" },
+    { id: "coffee", name: "Coffee & Tea", icon: "☕", group: "dining" },
+    { id: "groceries", name: "Groceries & Market", icon: "🛒", group: "groceries" },
+    { id: "transport", name: "Transport & Grab", icon: "🛵", group: "transit" },
+    { id: "fuel", name: "Fuel", icon: "⛽", group: "gas" },
+    { id: "shopping", name: "Shopping", icon: "🛍️", group: "retail" },
+    { id: "bills", name: "Bills & Utilities", icon: "💡", group: "utilities" },
+    { id: "health", name: "Health & Pharmacy", icon: "⚕️", group: "health" },
+    { id: "entertainment", name: "Entertainment", icon: "🎬", group: "entertainment" },
+    { id: "education", name: "Education", icon: "🎓", group: "education" },
+    { id: "home", name: "Home & Repairs", icon: "🏠", group: "home" },
+    { id: "personal", name: "Personal Care", icon: "💈", group: "beauty" },
+    { id: "gifts", name: "Family & Gifts", icon: "🎁", group: "other" },
+    { id: "other", name: "Other", icon: "•", group: "other" }
+  ];
+  const cashCat = (id) => CASH_CATEGORIES.find((c) => c.id === id) || CASH_CATEGORIES[CASH_CATEGORIES.length - 1];
+  const isCash = (t) => t.type === "cash";
+
+  /* Unified category for any transaction, so cash and card share buckets in stats. */
+  function txnGroup(t) {
+    return isCash(t) ? cashCat(t.cashCat).group : mccInfo(t.mcc).groupId;
+  }
+  function txnLabel(t) {
+    return isCash(t) ? cashCat(t.cashCat).name : mccInfo(t.mcc).name;
+  }
+  function txnIcon(t) {
+    return isCash(t) ? cashCat(t.cashCat).icon : mccInfo(t.mcc).icon;
+  }
+
+  /* Categorical palette for the pie slices. Validated for dark surface #12161f
+     across all pairs: lightness band, chroma floor, CVD separation (worst 8.8
+     deutan / 10.0 tritan), normal-vision floor 15.9, contrast >= 3:1. Assigned in
+     fixed order and never cycled — a 7th category folds into "Other". */
+  const PIE_COLORS = ["#00a1e0", "#00886d", "#b27c00", "#b2392b", "#994ec9", "#e356a2"];
+  const PIE_OTHER = "#5c6675";
   const GRADIENT_KEYS = Object.keys(GRADIENTS);
 
   // ---------------- state ----------------
@@ -394,6 +433,15 @@
     return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
   }
   const dateLabel = (s) => parseDate(s).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  /* Day heading in Activity — "Today"/"Yesterday" when close, otherwise weekday + date. */
+  function dayLabel(s) {
+    const today = todayStr();
+    if (s === today) return "Today";
+    const y = parseDate(today); y.setDate(y.getDate() - 1);
+    const ys = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, "0")}-${String(y.getDate()).padStart(2, "0")}`;
+    if (s === ys) return "Yesterday";
+    return parseDate(s).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  }
 
   /* Next calendar occurrence of a day-of-month, clamped to short months. */
   function nextOccurrence(day) {
@@ -450,6 +498,7 @@
     // cycle clears a spend threshold, so the gate needs the period total up front.
     const spendAcc = {};
     for (const t of state.transactions) {
+      if (isCash(t)) continue;
       const card = getCard(t.cardId);
       if (!card || !card.cardCap || !(card.cardCap.minSpend > 0)) continue;
       const k = `${card.id}|${periodKey(t.date, card.cardCap.period || "monthly")}`;
@@ -460,6 +509,8 @@
       a.date < b.date ? -1 : a.date > b.date ? 1 : a.id.localeCompare(b.id)
     );
     for (const t of sorted) {
+      // Cash earns nothing — it is tracked for spending totals only.
+      if (isCash(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._pending = false; continue; }
       const card = getCard(t.cardId);
       if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._pending = false; continue; }
       const base = card.baseRate || 0;
@@ -678,7 +729,10 @@
   const titleEl = document.getElementById("topbarTitle");
   const actionEl = document.getElementById("topbarAction");
   const tabbar = document.getElementById("tabbar");
-  const TITLES = { home: "Overview", log: "New Purchase", cards: "My Cards", history: "Activity", mcc: "MCC Lookup", more: "Settings" };
+  const TITLES = {
+    home: "Overview", log: "Card Purchase", cash: "Cash Spending",
+    cards: "My Cards", history: "Activity", stats: "Statistics", more: "Settings"
+  };
   let tab = "home";
   let histFilter = "all";
 
@@ -696,7 +750,10 @@
   function render() {
     recompute();
     actionEl.hidden = tab !== "cards";
-    ({ home: renderHome, log: renderLog, cards: renderCards, history: renderHistory, mcc: renderMccTab, more: renderMore }[tab])();
+    ({
+      home: renderHome, log: renderLog, cash: renderCash, cards: renderCards,
+      history: renderHistory, stats: renderStats, more: renderMore
+    }[tab])();
   }
 
   // ================= HOME =================
@@ -707,11 +764,15 @@
       return;
     }
     const total = state.transactions.reduce((s, t) => s + t._cb, 0);
+    const totalSpent = state.transactions.reduce((s, t) => s + t.amount, 0);
     const mk = todayStr().slice(0, 7);
     const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
     const mCb = mTx.reduce((s, t) => s + t._cb, 0);
     const mSp = mTx.reduce((s, t) => s + t.amount, 0);
-    const effective = mSp > 0 ? (mCb / mSp) * 100 : 0;
+    const mCash = mTx.filter(isCash).reduce((s, t) => s + t.amount, 0);
+    const mCard = mSp - mCash;
+    // Effective rate only makes sense against spending that could earn anything.
+    const effective = mCard > 0 ? (mCb / mCard) * 100 : 0;
 
     // Billing reminders
     const alerts = [];
@@ -739,8 +800,6 @@
         </div>`).join("")
       : "";
 
-    const topHtml = spendingStats(mTx, mSp);
-
     const cardsHtml = [...state.cards]
       .sort((a, b) => cardTotals(b.id).cashback - cardTotals(a.id).cashback)
       .map((c) => {
@@ -765,92 +824,213 @@
 
     view.innerHTML = `
       <div class="hero">
-        <div class="label">Total cash back</div>
-        <div class="big num">${money(total)}</div>
+        <div class="hero-duo">
+          <div>
+            <div class="label">Total cash back</div>
+            <div class="big num">${money(total)}</div>
+          </div>
+          <div class="hero-right">
+            <div class="label">Total spent</div>
+            <div class="big alt num">${moneyShort(totalSpent)}</div>
+          </div>
+        </div>
         <div class="sub">
-          <div class="item"><div class="k">This month</div><div class="v num">${money(mCb)}</div></div>
-          <div class="item"><div class="k">Spent</div><div class="v num">${moneyShort(mSp)}</div></div>
+          <div class="item"><div class="k">Month back</div><div class="v num">${money(mCb)}</div></div>
+          <div class="item"><div class="k">Month spend</div><div class="v num">${moneyShort(mSp)}</div></div>
           <div class="item"><div class="k">Effective</div><div class="v num">${effective.toFixed(2).replace(".", ",")}%</div></div>
         </div>
       </div>
+      <div class="stat-2" style="margin-bottom:13px;">
+        <div class="stat"><div class="k">Card spend · month</div><div class="v num">${money(mCard)}</div></div>
+        <div class="stat"><div class="k">Cash spend · month</div><div class="v num">${money(mCash)}</div></div>
+      </div>
       ${alertsHtml}
-      <div class="section-title">Cards</div>
+      <div class="section-title">Cards <span class="link" data-action="goto-stats">See statistics ›</span></div>
       <div class="card-stack">${cardsHtml}</div>
-      ${topHtml}
     `;
   }
 
-  /* Month-to-date spending broken down two ways: by merchant category and by card.
-     Both are ranked-magnitude comparisons, so both are plain horizontal bars with
-     every value directly labelled — no legend needed, and nothing depends on colour
-     alone. Categories share one hue (the ranking is the message); cards keep their
-     own colour, because colour should follow the entity, not its rank. */
-  function spendingStats(mTx, totalSpend) {
-    if (!mTx.length) {
-      return `<div class="section-title">Spending · This Month</div>
-        <div class="empty" style="padding:32px 20px;">Nothing logged this month yet.</div>`;
-    }
-    const pct = (n) => (totalSpend > 0 ? (n / totalSpend) * 100 : 0);
+  // ================= STATISTICS =================
+  let statsRange = "month";   // month | last | all
+  let statsView = "pie";      // pie | bars
 
-    // --- by merchant category ---
+  function statsWindow() {
+    const today = todayStr();
+    if (statsRange === "all") return { txns: state.transactions.slice(), label: "All time" };
+    if (statsRange === "last") {
+      const d = parseDate(today);
+      d.setDate(1); d.setMonth(d.getMonth() - 1);
+      const mk = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+      return { txns: state.transactions.filter((t) => t.date.slice(0, 7) === mk), label: monthLabel(mk) };
+    }
+    const mk = today.slice(0, 7);
+    return { txns: state.transactions.filter((t) => t.date.slice(0, 7) === mk), label: monthLabel(mk) };
+  }
+
+  /* Donut for part-to-whole. Capped at 6 slices plus "Other" so the validated
+     categorical palette is never cycled, with a 2px surface gap between slices
+     and every slice directly labelled in the legend below. */
+  function donut(slices, centerTop, centerBottom) {
+    const total = slices.reduce((s, x) => s + x.value, 0);
+    if (total <= 0) return "";
+    const R = 78, SW = 26, C = 100;
+    const circ = 2 * Math.PI * R;
+    const GAP = 2;
+    let offset = 0;
+    const arcs = slices.map((s) => {
+      const frac = s.value / total;
+      const len = Math.max(0, frac * circ - GAP);
+      const el = '<circle cx="' + C + '" cy="' + C + '" r="' + R + '" fill="none" stroke="' + s.color +
+        '" stroke-width="' + SW + '" stroke-dasharray="' + len + ' ' + (circ - len) +
+        '" stroke-dashoffset="' + (-offset) + '" transform="rotate(-90 ' + C + ' ' + C + ')" />';
+      offset += frac * circ;
+      return el;
+    }).join("");
+    return '<div class="donut-wrap">' +
+      '<svg class="donut" viewBox="0 0 200 200" role="img" aria-label="Spending share">' +
+        '<circle cx="' + C + '" cy="' + C + '" r="' + R + '" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="' + SW + '" />' +
+        arcs +
+      '</svg>' +
+      '<div class="donut-mid"><div class="dm-1 num">' + esc(centerTop) + '</div>' +
+      '<div class="dm-2">' + esc(centerBottom) + '</div></div>' +
+    '</div>';
+  }
+
+  /* Roll a ranked list down to at most `keep` slices, folding the tail into Other. */
+  function foldToSlices(rows, keep) {
+    const head = rows.slice(0, keep);
+    const tail = rows.slice(keep);
+    const out = head.map((r, i) => Object.assign({}, r, { color: PIE_COLORS[i] }));
+    if (tail.length) {
+      out.push({
+        // "Everything Else" is a real MCC group, so the fold bucket needs its own name.
+        key: "__other", name: "Smaller categories (" + tail.length + ")", icon: "▪",
+        value: tail.reduce((s, r) => s + r.value, 0),
+        cb: tail.reduce((s, r) => s + (r.cb || 0), 0),
+        n: tail.reduce((s, r) => s + (r.n || 0), 0),
+        color: PIE_OTHER
+      });
+    }
+    return out;
+  }
+
+  function legendRows(slices, total) {
+    return slices.map((s) => {
+      const p = total > 0 ? (s.value / total) * 100 : 0;
+      return '<div class="lg-row">' +
+        '<span class="lg-dot" style="background:' + s.color + '"></span>' +
+        '<span class="lg-ic">' + (s.icon || "") + '</span>' +
+        '<span class="lg-name">' + esc(s.name) + '</span>' +
+        '<span class="lg-pct num">' + p.toFixed(1).replace(".", ",") + '%</span>' +
+        '<span class="lg-val num">' + money(s.value) + '</span>' +
+      '</div>';
+    }).join("");
+  }
+
+  function barRows(rows, total, maxVal, colorOf) {
+    return rows.map((r) => {
+      const pctTxt = (total > 0 ? (r.value / total) * 100 : 0).toFixed(1).replace(".", ",");
+      const lead = r.icon
+        ? '<span class="brk-ic">' + r.icon + '</span>'
+        : '<span class="brk-swatch" style="background:' + colorOf(r) + '"></span>';
+      const back = r.cb > 0
+        ? '<span class="brk-cb num">' + money(r.cb) + ' back</span>'
+        : '<span class="brk-cb" style="color:var(--text-3)">no cash back</span>';
+      return '<div class="brk">' +
+        '<div class="brk-head">' + lead +
+          '<span class="brk-name">' + esc(r.name) + '</span>' +
+          '<span class="brk-val num">' + money(r.value) + '</span>' +
+        '</div>' +
+        '<div class="brk-bar"><i style="width:' + ((r.value / maxVal) * 100) + '%;background:' + colorOf(r) + '"></i></div>' +
+        '<div class="brk-foot"><span>' + pctTxt + '% · ' + r.n + ' purchase' + (r.n === 1 ? "" : "s") + '</span>' + back + '</div>' +
+      '</div>';
+    }).join("");
+  }
+
+  function renderStats() {
+    const win = statsWindow();
+    const txns = win.txns, label = win.label;
+    const totalSpend = txns.reduce((s, t) => s + t.amount, 0);
+    const totalCb = txns.reduce((s, t) => s + t._cb, 0);
+    const cashSpend = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
+    const cardSpend = totalSpend - cashSpend;
+
+    const controls =
+      '<div class="chips">' +
+        '<button class="chip ' + (statsRange === "month" ? "active" : "") + '" data-action="stats-range" data-v="month">This month</button>' +
+        '<button class="chip ' + (statsRange === "last" ? "active" : "") + '" data-action="stats-range" data-v="last">Last month</button>' +
+        '<button class="chip ' + (statsRange === "all" ? "active" : "") + '" data-action="stats-range" data-v="all">All time</button>' +
+      '</div>' +
+      '<div class="seg">' +
+        '<button class="seg-btn ' + (statsView === "pie" ? "on" : "") + '" data-action="stats-view" data-v="pie">Pie</button>' +
+        '<button class="seg-btn ' + (statsView === "bars" ? "on" : "") + '" data-action="stats-view" data-v="bars">Bars</button>' +
+      '</div>';
+
+    if (!txns.length) {
+      view.innerHTML = controls + '<div class="empty"><div class="ico">📊</div>Nothing logged in ' + esc(label) + '.</div>';
+      return;
+    }
+
+    // Category rows — cash and card unified into the same MCC groups.
     const byGroup = {};
-    for (const t of mTx) {
-      const g = mccInfo(t.mcc).groupId;
-      const e = byGroup[g] || (byGroup[g] = { sp: 0, cb: 0, n: 0 });
-      e.sp += t.amount; e.cb += t._cb; e.n++;
+    for (const t of txns) {
+      const g = txnGroup(t);
+      const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
+      e.value += t.amount; e.cb += t._cb; e.n++;
     }
-    const cats = Object.entries(byGroup).sort((a, b) => b[1].sp - a[1].sp);
-    const maxCat = cats[0][1].sp || 1;
+    const catRows = Object.keys(byGroup)
+      .map((g) => Object.assign({ key: g, name: groupName(g), icon: groupIcon(g) }, byGroup[g]))
+      .sort((a, b) => b.value - a.value);
+    const catSlices = foldToSlices(catRows, PIE_COLORS.length);
 
-    const catRows = cats.map(([g, v]) => `
-      <div class="brk">
-        <div class="brk-head">
-          <span class="brk-ic">${groupIcon(g)}</span>
-          <span class="brk-name">${esc(groupName(g))}</span>
-          <span class="brk-val num">${money(v.sp)}</span>
-        </div>
-        <div class="brk-bar"><i style="width:${(v.sp / maxCat) * 100}%"></i></div>
-        <div class="brk-foot">
-          <span>${pct(v.sp).toFixed(1).replace(".", ",")}% of spend · ${v.n} purchase${v.n === 1 ? "" : "s"}</span>
-          <span class="brk-cb num">${money(v.cb)} back</span>
-        </div>
-      </div>`).join("");
+    // Payment sources — every card plus cash.
+    const srcRows = state.cards.map((c) => {
+      const tx = txns.filter((t) => !isCash(t) && t.cardId === c.id);
+      return {
+        key: c.id, name: (c.issuer ? c.issuer + " " : "") + c.name, card: c,
+        value: tx.reduce((s, t) => s + t.amount, 0),
+        cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.length
+      };
+    }).filter((r) => r.value > 0);
+    if (cashSpend > 0) {
+      srcRows.push({ key: "__cash", name: "Cash", icon: "💵", value: cashSpend, cb: 0, n: txns.filter(isCash).length });
+    }
+    srcRows.sort((a, b) => b.value - a.value);
+    const srcColor = (r) => (r.card ? gradCss(r.card.gradient) : "#4a5566");
 
-    // --- by card ---
-    const byCard = state.cards.map((c) => {
-      const tx = mTx.filter((t) => t.cardId === c.id);
-      return { card: c, sp: tx.reduce((s, t) => s + t.amount, 0), cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.length };
-    }).filter((x) => x.sp > 0).sort((a, b) => b.sp - a.sp);
-
-    let cardHtml = "";
-    if (byCard.length) {
-      const maxCard = byCard[0].sp || 1;
-      // 2px gaps let the surface show between segments so adjacent shares stay distinct.
-      const share = byCard.length > 1
-        ? `<div class="share-bar">${byCard.map((x) =>
-            `<i style="flex:${x.sp};background:${gradCss(x.card.gradient)}"></i>`).join("")}</div>`
+    let body;
+    if (statsView === "pie") {
+      const srcSlices = srcRows.map((r) => Object.assign({}, r, { color: r.card ? grad(r.card.gradient)[0] : PIE_OTHER }));
+      body =
+        '<div class="section-title">Spending by Category<span class="link num">' + money(totalSpend) + '</span></div>' +
+        donut(catSlices, moneyShort(totalSpend), label) +
+        '<div class="legend">' + legendRows(catSlices, totalSpend) + '</div>' +
+        '<div class="section-title">Where It Was Paid From</div>' +
+        donut(srcSlices, moneyShort(totalSpend), "total spend") +
+        '<div class="legend">' + legendRows(srcSlices, totalSpend) + '</div>';
+    } else {
+      const maxCat = catRows[0].value || 1;
+      const maxSrc = srcRows.length ? srcRows[0].value : 1;
+      const shareBar = srcRows.length > 1
+        ? '<div class="share-bar">' + srcRows.map((r) => '<i style="flex:' + r.value + ';background:' + srcColor(r) + '"></i>').join("") + '</div>'
         : "";
-      cardHtml = `<div class="section-title">Share by Card · This Month</div>
-        ${share}
-        ${byCard.map((x) => `
-          <div class="brk">
-            <div class="brk-head">
-              <span class="brk-swatch" style="background:${gradCss(x.card.gradient)}"></span>
-              <span class="brk-name">${x.card.issuer ? `<span class="brk-issuer">${esc(x.card.issuer)}</span> ` : ""}${esc(x.card.name)}</span>
-              <span class="brk-val num">${money(x.sp)}</span>
-            </div>
-            <div class="brk-bar"><i style="width:${(x.sp / maxCard) * 100}%;background:${gradCss(x.card.gradient)}"></i></div>
-            <div class="brk-foot">
-              <span>${pct(x.sp).toFixed(1).replace(".", ",")}% of spend · ${x.n} purchase${x.n === 1 ? "" : "s"}</span>
-              <span class="brk-cb num">${money(x.cb)} back</span>
-            </div>
-          </div>`).join("")}`;
+      body =
+        '<div class="section-title">Spending by Category<span class="link num">' + money(totalSpend) + '</span></div>' +
+        barRows(catRows, totalSpend, maxCat, () => "linear-gradient(90deg, var(--gold), #e8cf9e)") +
+        '<div class="section-title">Where It Was Paid From</div>' + shareBar +
+        barRows(srcRows, totalSpend, maxSrc, srcColor);
     }
 
-    return `<div class="section-title">Spending by Category · This Month
-        <span class="link num">${money(totalSpend)}</span></div>
-      ${catRows}
-      ${cardHtml}`;
+    view.innerHTML = controls +
+      '<div class="stat-2" style="margin-bottom:6px;">' +
+        '<div class="stat"><div class="k">Total spent</div><div class="v num">' + money(totalSpend) + '</div></div>' +
+        '<div class="stat"><div class="k">Cash back</div><div class="v mint num">' + money(totalCb) + '</div></div>' +
+      '</div>' +
+      '<div class="stat-2" style="margin-bottom:6px;">' +
+        '<div class="stat"><div class="k">On cards</div><div class="v num">' + money(cardSpend) + '</div></div>' +
+        '<div class="stat"><div class="k">In cash</div><div class="v num">' + money(cashSpend) + '</div></div>' +
+      '</div>' +
+      body;
   }
 
   // ================= LOG =================
@@ -1590,42 +1770,80 @@
   // ================= HISTORY =================
   function renderHistory() {
     if (!state.transactions.length) {
-      view.innerHTML = `<div class="empty"><div class="ico">🧾</div>Nothing logged yet.<br>Add a purchase from the <b>Log</b> tab.</div>`;
+      view.innerHTML = '<div class="empty"><div class="ico">🧾</div>Nothing logged yet.<br>Add a purchase from <b>Log</b> or <b>Cash</b>.</div>';
       return;
     }
-    const chips = `<div class="chips">
-      <button class="chip ${histFilter === "all" ? "active" : ""}" data-action="filter" data-id="all">All cards</button>
-      ${state.cards.map((c) => `<button class="chip ${histFilter === c.id ? "active" : ""}" data-action="filter" data-id="${c.id}">${esc(c.name)}</button>`).join("")}
-    </div>`;
+    const chips = '<div class="chips">' +
+      '<button class="chip ' + (histFilter === "all" ? "active" : "") + '" data-action="filter" data-id="all">All</button>' +
+      state.cards.map((c) => '<button class="chip ' + (histFilter === c.id ? "active" : "") + '" data-action="filter" data-id="' + c.id + '">' + esc(c.name) + '</button>').join("") +
+      '<button class="chip ' + (histFilter === "cash" ? "active" : "") + '" data-action="filter" data-id="cash">💵 Cash</button>' +
+      '</div>';
 
     const list = state.transactions
-      .filter((t) => histFilter === "all" || t.cardId === histFilter)
+      .filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter))
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)));
 
-    if (!list.length) return void (view.innerHTML = chips + `<div class="empty">No purchases on this card yet.</div>`);
+    if (!list.length) return void (view.innerHTML = chips + '<div class="empty">Nothing logged here yet.</div>');
 
-    let html = chips, lastMonth = null;
+    // Grouped month → day, each header carrying its own totals.
+    let html = chips, lastMonth = null, lastDay = null;
     for (const t of list) {
       const mk = t.date.slice(0, 7);
       if (mk !== lastMonth) {
         const mTx = list.filter((x) => x.date.slice(0, 7) === mk);
-        html += `<div class="section-title">${monthLabel(mk)}
-          <span class="link num">${money(mTx.reduce((s, x) => s + x._cb, 0))}</span></div>`;
+        const mSpend = mTx.reduce((s, x) => s + x.amount, 0);
+        const mBack = mTx.reduce((s, x) => s + x._cb, 0);
+        html += '<div class="month-bar">' +
+          '<div class="mb-name">' + monthLabel(mk) + '</div>' +
+          '<div class="mb-nums"><span class="num">' + money(mSpend) + '</span>' +
+          '<span class="mb-cb num">+' + money(mBack) + '</span></div>' +
+        '</div>';
         lastMonth = mk;
+        lastDay = null;
       }
-      const card = getCard(t.cardId);
-      const info = mccInfo(t.mcc);
-      html += `<div class="row" data-action="open-txn" data-id="${t.id}">
-        <div class="glyph">${info.icon}</div>
-        <div class="body">
-          <div class="t1">${esc(t.note || info.name)}${t._pending ? '<span class="tag pend">PENDING</span>' : t._capped ? '<span class="tag cap">CAP</span>' : ""}</div>
-          <div class="t2">${card ? esc(card.name) : "Deleted card"} · ${dateLabel(t.date)} <span class="tag mcc">${esc(t.mcc)}</span></div>
-        </div>
-        <div class="tail">
-          <div class="a1 num">${money(t.amount)}</div>
-          <div class="a2 num" ${t._pending ? 'style="color:var(--amber)"' : ""}>${t._pending ? "min spend not met" : "+" + money(t._cb) + " · " + t._rate + "%"}</div>
-        </div>
-      </div>`;
+      if (t.date !== lastDay) {
+        const dTx = list.filter((x) => x.date === t.date);
+        const dSpend = dTx.reduce((s, x) => s + x.amount, 0);
+        const dBack = dTx.reduce((s, x) => s + x._cb, 0);
+        html += '<div class="day-bar">' +
+          '<div class="db-left">' +
+            '<span class="db-day">' + dayLabel(t.date) + '</span>' +
+            '<span class="db-count">' + dTx.length + ' item' + (dTx.length === 1 ? "" : "s") + '</span>' +
+          '</div>' +
+          '<div class="db-right"><span class="num">' + money(dSpend) + '</span>' +
+          (dBack > 0 ? '<span class="db-cb num">+' + money(dBack) + '</span>' : "") +
+          '</div>' +
+        '</div>';
+        lastDay = t.date;
+      }
+
+      if (isCash(t)) {
+        const c = cashCat(t.cashCat);
+        html += '<div class="row txn" data-action="open-cash" data-id="' + t.id + '">' +
+          '<div class="glyph">' + c.icon + '</div>' +
+          '<div class="body">' +
+            '<div class="t1">' + esc(t.note || c.name) + '<span class="tag cash">CASH</span></div>' +
+            '<div class="t2">' + esc(c.name) + '</div>' +
+          '</div>' +
+          '<div class="tail"><div class="a1 num">' + money(t.amount) + '</div>' +
+          '<div class="a2" style="color:var(--text-3)">no cash back</div></div>' +
+        '</div>';
+      } else {
+        const card = getCard(t.cardId);
+        const info = mccInfo(t.mcc);
+        const badge = t._pending ? '<span class="tag pend">PENDING</span>' : t._capped ? '<span class="tag cap">CAP</span>' : "";
+        html += '<div class="row txn" data-action="open-txn" data-id="' + t.id + '">' +
+          '<div class="glyph">' + info.icon + '</div>' +
+          '<div class="body">' +
+            '<div class="t1">' + esc(t.note || info.name) + badge + '</div>' +
+            '<div class="t2">' + (card ? esc(card.name) : "Deleted card") + ' <span class="tag mcc">' + esc(t.mcc) + '</span></div>' +
+          '</div>' +
+          '<div class="tail"><div class="a1 num">' + money(t.amount) + '</div>' +
+          '<div class="a2 num"' + (t._pending ? ' style="color:var(--amber)"' : "") + '>' +
+            (t._pending ? "min spend not met" : "+" + money(t._cb) + " · " + t._rate + "%") +
+          '</div></div>' +
+        '</div>';
+      }
     }
     view.innerHTML = html;
   }
@@ -1687,89 +1905,130 @@
     paint();
   }
 
-  // ================= MCC LOOKUP =================
-  let mccQuery = "";
-  let mccOpenGroup = null;
+  // ================= CASH SPENDING =================
+  const cashDraft = { cat: null, amount: "", date: null, note: "" };
 
-  /* Which of your cards pays the most on a given MCC — the practical question
-     behind "what MCC is this merchant?". */
-  function bestCardFor(mcc) {
-    if (!state.cards.length) return null;
-    const ranked = state.cards
-      .map((c) => ({ card: c, q: quote(c, mcc, 1000000, todayStr()) }))
-      .sort((a, b) => b.q.cashback - a.q.cashback);
-    return ranked[0].q.rate > 0 ? ranked[0] : null;
-  }
+  function renderCash() {
+    if (!cashDraft.cat) cashDraft.cat = state.settings.recentCash && state.settings.recentCash[0] || "food";
+    if (!cashDraft.date) cashDraft.date = todayStr();
 
-  function renderMccTab() {
-    const q = mccQuery.trim().toLowerCase();
-    let body = "";
+    const mk = todayStr().slice(0, 7);
+    const monthCash = state.transactions
+      .filter((t) => isCash(t) && t.date.slice(0, 7) === mk)
+      .reduce((s, t) => s + t.amount, 0);
 
-    if (q) {
-      const hits = [];
-      for (const g of MCC_GROUPS) {
-        for (const [code, name] of g.codes) {
-          if (code.includes(q) || name.toLowerCase().includes(q) || g.name.toLowerCase().includes(q)) {
-            hits.push({ code, name, group: g });
-          }
-        }
-      }
-      body = hits.length
-        ? hits.map((h) => mccResultRow(h.code, h.name, h.group)).join("")
-        : `<div class="empty">No MCC matches “${esc(mccQuery)}”.<br>Try a merchant type like “hotel” or a code like “5812”.</div>`;
-    } else {
-      body = MCC_GROUPS.map((g) => `
-        <div class="mcc-group ${mccOpenGroup === g.id ? "open" : ""}">
-          <button class="mcc-group-head" data-group="${g.id}">
-            <span class="gi">${g.icon}</span>
-            <span class="gn">${esc(g.name)}</span>
-            <span class="gc num">${g.codes.length}</span>
-            <span class="gx">${mccOpenGroup === g.id ? "−" : "+"}</span>
-          </button>
-          ${mccOpenGroup === g.id ? `<div class="mcc-group-body">${g.codes.map(([c, n]) => mccResultRow(c, n, g)).join("")}</div>` : ""}
-        </div>`).join("");
-    }
+    const tiles = CASH_CATEGORIES.map((c) =>
+      '<button type="button" class="cat-tile ' + (c.id === cashDraft.cat ? "sel" : "") + '" data-pickcash="' + c.id + '">' +
+        '<span class="ci">' + c.icon + '</span>' +
+        '<span class="cn">' + esc(c.name) + '</span>' +
+      '</button>').join("");
 
-    view.innerHTML = `
-      <div class="sticky-search" style="background:linear-gradient(180deg,var(--bg) 70%,transparent);padding-top:2px;">
-        <input id="mccTabSearch" type="search" placeholder="Search merchant type or MCC code" value="${esc(mccQuery)}" autocomplete="off" />
-      </div>
-      <div class="hint" style="margin:2px 4px 12px;">
-        Merchant Category Codes decide which cash back rule a purchase hits. Look one up to see
-        which of your cards pays best on it.
-      </div>
-      ${body}
-    `;
+    view.innerHTML =
+      '<div class="stat" style="margin-bottom:13px;">' +
+        '<div class="k">Cash spent this month</div>' +
+        '<div class="v num">' + money(monthCash) + '</div>' +
+      '</div>' +
+      '<div class="panel">' +
+        '<div class="field">' +
+          '<label>Amount</label>' +
+          '<div class="amount-input">' +
+            '<input id="k_amount" type="text" inputmode="numeric" placeholder="0" value="' + esc(cashDraft.amount) + '" />' +
+            '<span class="cur">₫</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="field">' +
+          '<label>Category</label>' +
+          '<div class="cat-grid cash-grid">' + tiles + '</div>' +
+        '</div>' +
+        '<div class="row-2">' +
+          '<div class="field"><label>Date</label><input id="k_date" type="date" value="' + cashDraft.date + '" /></div>' +
+          '<div class="field"><label>Note</label><input id="k_note" type="text" placeholder="Optional" value="' + esc(cashDraft.note) + '" /></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="hint" style="margin:-4px 4px 14px;">Cash earns no cash back — these entries are tracked so your spending statistics are complete.</div>' +
+      '<button class="btn btn-primary" id="saveCash">Add Cash Spending</button>';
 
-    const s = document.getElementById("mccTabSearch");
-    s.addEventListener("input", () => {
-      mccQuery = s.value;
-      const pos = s.selectionStart;
-      renderMccTab();
-      const ns = document.getElementById("mccTabSearch");
-      ns.focus();
-      try { ns.setSelectionRange(pos, pos); } catch (e) {}
-    });
-    view.querySelectorAll("[data-group]").forEach((b) => {
+    const amtEl = document.getElementById("k_amount");
+    const dateEl = document.getElementById("k_date");
+    const noteEl = document.getElementById("k_note");
+    wireMoneyInput(amtEl);
+
+    view.querySelectorAll("[data-pickcash]").forEach((b) => {
       b.addEventListener("click", () => {
-        mccOpenGroup = mccOpenGroup === b.dataset.group ? null : b.dataset.group;
-        renderMccTab();
+        cashDraft.amount = amtEl.value;
+        cashDraft.note = noteEl.value;
+        cashDraft.date = dateEl.value || todayStr();
+        cashDraft.cat = b.dataset.pickcash;
+        renderCash();
       });
     });
+
+    document.getElementById("saveCash").addEventListener("click", () => {
+      const amt = parseVnd(amtEl.value);
+      if (!(amt > 0)) { toast("Enter an amount first"); return; }
+      state.transactions.push({
+        id: uid(), type: "cash", cardId: null, cashCat: cashDraft.cat,
+        amount: amt, date: dateEl.value || todayStr(), note: noteEl.value.trim()
+      });
+      if (!state.settings.recentCash) state.settings.recentCash = [];
+      const rec = state.settings.recentCash.filter((c) => c !== cashDraft.cat);
+      rec.unshift(cashDraft.cat);
+      state.settings.recentCash = rec.slice(0, 6);
+      save(); recompute(); runDailyBackup();
+      toast(money(amt) + " cash logged");
+      cashDraft.amount = ""; cashDraft.note = "";
+      renderCash();
+    });
   }
 
-  function mccResultRow(code, name, group) {
-    const best = bestCardFor(code);
-    return `<div class="row row-mcc">
-      <div class="glyph">${group.icon}</div>
-      <div class="body">
-        <div class="t1">${esc(name)}</div>
-        <div class="t2">${best
-          ? `<b style="color:var(--mint)">${best.q.rate}%</b> on ${esc(best.card.name)}`
-          : state.cards.length ? "No cash back on your cards" : esc(group.name)}</div>
-      </div>
-      <div class="mcc-code num">${esc(code)}</div>
-    </div>`;
+  function openCashTxn(id) {
+    const t = state.transactions.find((x) => x.id === id);
+    if (!t) return;
+    let cat = t.cashCat;
+    function paint() {
+      const tiles = CASH_CATEGORIES.map((c) =>
+        '<button type="button" class="cat-tile ' + (c.id === cat ? "sel" : "") + '" data-editcash="' + c.id + '">' +
+          '<span class="ci">' + c.icon + '</span><span class="cn">' + esc(c.name) + '</span>' +
+        '</button>').join("");
+      openSheet(
+        '<h2>Edit Cash Spending</h2>' +
+        '<div class="sheet-sub">Cash earns no cash back</div>' +
+        '<div class="field"><label>Amount</label>' +
+          '<div class="amount-input"><input id="ke_amount" type="text" inputmode="numeric" value="' + formatVnd(t.amount) + '" /><span class="cur">₫</span></div>' +
+        '</div>' +
+        '<div class="field"><label>Category</label><div class="cat-grid cash-grid">' + tiles + '</div></div>' +
+        '<div class="row-2">' +
+          '<div class="field"><label>Date</label><input id="ke_date" type="date" value="' + t.date + '" /></div>' +
+          '<div class="field"><label>Note</label><input id="ke_note" type="text" value="' + esc(t.note || "") + '" /></div>' +
+        '</div>' +
+        '<button class="btn btn-primary" id="ke_save">Save Changes</button>' +
+        '<button class="btn btn-danger" id="ke_del">Delete</button>' +
+        '<button class="btn btn-ghost" data-action="close-sheet">Cancel</button>'
+      );
+      wireMoneyInput(document.getElementById("ke_amount"));
+      sheetEl.querySelectorAll("[data-editcash]").forEach((b) => {
+        b.addEventListener("click", () => {
+          t.amount = parseVnd(document.getElementById("ke_amount").value) || t.amount;
+          cat = b.dataset.editcash;
+          paint();
+        });
+      });
+      document.getElementById("ke_save").addEventListener("click", () => {
+        const amt = parseVnd(document.getElementById("ke_amount").value);
+        if (!(amt > 0)) { toast("Enter a valid amount"); return; }
+        t.amount = amt;
+        t.cashCat = cat;
+        t.date = document.getElementById("ke_date").value || t.date;
+        t.note = document.getElementById("ke_note").value.trim();
+        save(); closeSheet(); toast("Updated"); render();
+      });
+      document.getElementById("ke_del").addEventListener("click", () => {
+        if (!confirm("Delete this cash entry?")) return;
+        state.transactions = state.transactions.filter((x) => x.id !== t.id);
+        save(); closeSheet(); toast("Deleted"); render();
+      });
+    }
+    paint();
   }
 
   // ================= MORE / SETTINGS =================
@@ -2027,6 +2286,16 @@
         state.transactions = d.transactions || [];
         save(); closeSheet(); toast("Snapshot restored"); render();
       } catch (err) { alert("That snapshot is unreadable."); }
+    } else if (a === "open-cash") {
+      openCashTxn(el.dataset.id);
+    } else if (a === "goto-stats") {
+      go("stats");
+    } else if (a === "stats-range") {
+      statsRange = el.dataset.v;
+      renderStats();
+    } else if (a === "stats-view") {
+      statsView = el.dataset.v;
+      renderStats();
     } else if (a === "check-update") {
       toast("Checking…");
       checkForUpdate(true);
