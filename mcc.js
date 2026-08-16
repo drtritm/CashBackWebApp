@@ -34,6 +34,7 @@ const MCC_GROUPS = [
   {
     id: "online", name: "Online Shopping", icon: "📦",
     codes: [
+      ["5262", "Marketplaces & E-commerce Platforms"],
       ["5964", "Direct Marketing – Catalog Merchant"],
       ["5969", "Direct Marketing – Other"],
       ["5967", "Direct Marketing – Inbound Telemarketing"],
@@ -52,6 +53,8 @@ const MCC_GROUPS = [
       ["5399", "Misc. General Merchandise"],
       ["5651", "Family Clothing Stores"],
       ["5691", "Men's & Women's Clothing"],
+      ["5611", "Men's & Boys' Clothing"],
+      ["5621", "Women's Ready-to-Wear"],
       ["5661", "Shoe Stores"],
       ["5732", "Electronics Stores"],
       ["5734", "Computer Software Stores"],
@@ -179,6 +182,7 @@ const MCC_GROUPS = [
     id: "other", name: "Everything Else", icon: "•",
     codes: [
       ["0000", "Uncategorized / Other"],
+      ["8999", "Professional Services & E-wallets"],
       ["7399", "Business Services"],
       ["7311", "Advertising Services"],
       ["4215", "Courier & Shipping Services"],

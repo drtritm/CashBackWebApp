@@ -315,44 +315,107 @@
      Recomputing chronologically keeps caps correct after any edit or delete. */
   function recompute() {
     const acc = {};
+    const cardAcc = {};
+    // Pre-pass: some cards (Cake, MSB Visa Online) pay nothing unless the whole
+    // cycle clears a spend threshold, so the gate needs the period total up front.
+    const spendAcc = {};
+    for (const t of state.transactions) {
+      const card = getCard(t.cardId);
+      if (!card || !card.cardCap || !(card.cardCap.minSpend > 0)) continue;
+      const k = `${card.id}|${periodKey(t.date, card.cardCap.period || "monthly")}`;
+      spendAcc[k] = (spendAcc[k] || 0) + t.amount;
+    }
+
     const sorted = [...state.transactions].sort((a, b) =>
       a.date < b.date ? -1 : a.date > b.date ? 1 : a.id.localeCompare(b.id)
     );
     for (const t of sorted) {
       const card = getCard(t.cardId);
-      if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; continue; }
+      if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._pending = false; continue; }
       const base = card.baseRate || 0;
       const { rule, rate } = matchRule(card, t.mcc);
       t._ruleId = rule ? rule.id : null;
       t._rate = rate;
+      t._capped = false;
+      t._pending = false;
+      t._shortfall = 0;
 
+      let cb, bonusPart = 0, acc4rule = null, eligibleSpend = 0;
       if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
-        t._cb = (t.amount * rate) / 100;
-        t._capped = false;
-        continue;
-      }
-
-      const k = `${card.id}|${rule.id}|${periodKey(t.date, rule.cap.period)}`;
-      const a = acc[k] || (acc[k] = { cashback: 0, spend: 0 });
-
-      // How much of this purchase still qualifies for the bonus rate?
-      let eligible;
-      if (rule.cap.type === "spend") {
-        eligible = Math.max(0, Math.min(t.amount, rule.cap.amount - a.spend));
+        cb = (t.amount * rate) / 100;
+        bonusPart = cb;
       } else {
-        const remainingCb = Math.max(0, rule.cap.amount - a.cashback);
-        eligible = rate > 0 ? Math.min(t.amount, (remainingCb * 100) / rate) : 0;
+        const k = `${card.id}|${rule.id}|${periodKey(t.date, rule.cap.period)}`;
+        const a = acc[k] || (acc[k] = { cashback: 0, spend: 0 });
+        acc4rule = a;
+        // How much of this purchase still qualifies for the bonus rate?
+        let eligible;
+        if (rule.cap.type === "spend") {
+          eligible = Math.max(0, Math.min(t.amount, rule.cap.amount - a.spend));
+        } else {
+          const remainingCb = Math.max(0, rule.cap.amount - a.cashback);
+          eligible = rate > 0 ? Math.min(t.amount, (remainingCb * 100) / rate) : 0;
+        }
+        const overflow = t.amount - eligible;
+        // Spend past the cap drops to the card's base rate, like a real issuer.
+        bonusPart = (eligible * rate) / 100;
+        cb = bonusPart + (overflow * base) / 100;
+        eligibleSpend = eligible;
+        if (overflow > 0.004) t._capped = true;
       }
-      const overflow = t.amount - eligible;
-      // Spend past the cap drops to the card's base rate, like a real issuer.
-      t._cb = (eligible * rate) / 100 + (overflow * base) / 100;
-      t._capped = overflow > 0.004;
-      a.spend += eligible;
-      a.cashback += (eligible * rate) / 100;
+
+      // Per-transaction ceiling (Cake: 10k under 200k, 50k at or above).
+      if (rule && rule.txnCap && rule.txnCap.tierAt != null) {
+        const lim = t.amount >= rule.txnCap.tierAt ? rule.txnCap.above : rule.txnCap.below;
+        if (lim >= 0 && cb > lim) { cb = lim; t._capped = true; }
+      }
+
+      // Credit the category cap with what was actually paid, not the pre-clamp
+      // figure — otherwise a transaction capped at 10k still burns 30k of the cap.
+      if (acc4rule) {
+        acc4rule.spend += eligibleSpend;
+        acc4rule.cashback += Math.min(bonusPart, cb);
+      }
+
+      // Card-wide cap and minimum-spend gate.
+      if (card.cardCap && (card.cardCap.amount > 0 || card.cardCap.minSpend > 0)) {
+        const pk = periodKey(t.date, card.cardCap.period || "monthly");
+        const k = `${card.id}|${pk}`;
+        if (card.cardCap.minSpend > 0 && (spendAcc[k] || 0) < card.cardCap.minSpend) {
+          // Cycle hasn't qualified yet — show what it would pay, but count zero.
+          t._pending = true;
+          t._shortfall = card.cardCap.minSpend - (spendAcc[k] || 0);
+          t._cbPotential = cb;
+          cb = 0;
+        } else if (card.cardCap.amount > 0) {
+          const used = cardAcc[k] || 0;
+          const remain = Math.max(0, card.cardCap.amount - used);
+          if (cb > remain) { cb = remain; t._capped = true; }
+          cardAcc[k] = used + cb;
+        }
+      }
+
+      t._cb = cb;
     }
     capUsageCache = acc;
+    cardCapCache = cardAcc;
+    cardSpendCache = spendAcc;
   }
   let capUsageCache = {};
+  let cardCapCache = {};
+  let cardSpendCache = {};
+
+  function cardCapUsage(card, dateStr) {
+    if (!card.cardCap) return null;
+    const pk = periodKey(dateStr || todayStr(), card.cardCap.period || "monthly");
+    const k = `${card.id}|${pk}`;
+    return {
+      used: cardCapCache[k] || 0,
+      spend: cardSpendCache[k] || state.transactions
+        .filter((t) => t.cardId === card.id && periodKey(t.date, card.cardCap.period || "monthly") === pk)
+        .reduce((s, t) => s + t.amount, 0)
+    };
+  }
 
   function capUsage(card, rule, dateStr) {
     const k = `${card.id}|${rule.id}|${periodKey(dateStr || todayStr(), rule.cap.period)}`;
@@ -363,23 +426,49 @@
   function quote(card, mcc, amount, dateStr) {
     const base = card.baseRate || 0;
     const { rule, rate } = matchRule(card, mcc);
+    let cashback, capped = false, remaining = null;
+
     if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
-      return { cashback: (amount * rate) / 100, rate, rule, capped: false, remaining: null };
-    }
-    const used = capUsage(card, rule, dateStr);
-    let eligible, remaining;
-    if (rule.cap.type === "spend") {
-      remaining = Math.max(0, rule.cap.amount - used.spend);
-      eligible = Math.min(amount, remaining);
+      cashback = (amount * rate) / 100;
     } else {
-      remaining = Math.max(0, rule.cap.amount - used.cashback);
-      eligible = rate > 0 ? Math.min(amount, (remaining * 100) / rate) : 0;
+      const used = capUsage(card, rule, dateStr);
+      let eligible;
+      if (rule.cap.type === "spend") {
+        remaining = Math.max(0, rule.cap.amount - used.spend);
+        eligible = Math.min(amount, remaining);
+      } else {
+        remaining = Math.max(0, rule.cap.amount - used.cashback);
+        eligible = rate > 0 ? Math.min(amount, (remaining * 100) / rate) : 0;
+      }
+      const overflow = amount - eligible;
+      cashback = (eligible * rate) / 100 + (overflow * base) / 100;
+      capped = overflow > 0.004;
     }
-    const overflow = amount - eligible;
-    return {
-      cashback: (eligible * rate) / 100 + (overflow * base) / 100,
-      rate, rule, capped: overflow > 0.004, remaining, baseRate: base
-    };
+
+    // Per-transaction ceiling.
+    let txnLimited = false;
+    if (rule && rule.txnCap && rule.txnCap.tierAt != null) {
+      const lim = amount >= rule.txnCap.tierAt ? rule.txnCap.above : rule.txnCap.below;
+      if (lim >= 0 && cashback > lim) { cashback = lim; capped = true; txnLimited = true; }
+    }
+
+    // Card-wide cap and minimum-spend gate.
+    let pending = false, shortfall = 0, cardRemaining = null;
+    const potential = cashback;
+    if (card.cardCap) {
+      const u = cardCapUsage(card, dateStr) || { used: 0, spend: 0 };
+      if (card.cardCap.minSpend > 0 && u.spend + amount < card.cardCap.minSpend) {
+        // Nothing pays out until the cycle qualifies — show 0, keep the potential.
+        pending = true;
+        shortfall = card.cardCap.minSpend - (u.spend + amount);
+        cashback = 0;
+      } else if (card.cardCap.amount > 0) {
+        cardRemaining = Math.max(0, card.cardCap.amount - u.used);
+        if (cashback > cardRemaining) { cashback = cardRemaining; capped = true; }
+      }
+    }
+
+    return { cashback, potential, rate, rule, capped, remaining, baseRate: base, txnLimited, pending, shortfall, cardRemaining };
   }
 
   function cardTotals(cardId) {
@@ -398,24 +487,68 @@
   // ---------------- sheet ----------------
   const sheetEl = document.getElementById("sheet");
   const backdropEl = document.getElementById("sheetBackdrop");
-  function openSheet(html) {
+  let onSheetDismiss = null;
+
+  function openSheet(html, dismissHandler) {
     sheetEl.innerHTML = '<div class="sheet-handle"></div>' + html;
     sheetEl.classList.add("open");
     backdropEl.classList.add("open");
     sheetEl.scrollTop = 0;
+    sheetEl.style.transform = "";
+    // Runs when the sheet is dismissed by gesture/backdrop rather than a button,
+    // so a nested picker can hand control back instead of losing the parent sheet.
+    onSheetDismiss = dismissHandler || null;
   }
   function closeSheet() {
+    onSheetDismiss = null;
     sheetEl.classList.remove("open");
     backdropEl.classList.remove("open");
+    sheetEl.style.transform = "";
   }
-  backdropEl.addEventListener("click", closeSheet);
+  function dismissSheet() {
+    const cb = onSheetDismiss;
+    onSheetDismiss = null;
+    if (cb) { sheetEl.style.transform = ""; cb(); return; }
+    closeSheet();
+  }
+  backdropEl.addEventListener("click", dismissSheet);
+
+  /* Swipe down to dismiss. Only starts a drag when the sheet is already scrolled
+     to the top, so the gesture never fights the sheet's own scrolling. */
+  (() => {
+    let startY = 0, delta = 0, dragging = false;
+    sheetEl.addEventListener("touchstart", (e) => {
+      if (sheetEl.scrollTop > 0 || e.touches.length !== 1) { dragging = false; return; }
+      startY = e.touches[0].clientY;
+      delta = 0;
+      dragging = true;
+      sheetEl.style.transition = "none";
+    }, { passive: true });
+
+    sheetEl.addEventListener("touchmove", (e) => {
+      if (!dragging) return;
+      delta = e.touches[0].clientY - startY;
+      if (delta < 0) { delta = 0; return; }
+      sheetEl.style.transform = `translateY(${delta}px)`;
+    }, { passive: true });
+
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      sheetEl.style.transition = "";
+      if (delta > 110) dismissSheet();
+      else sheetEl.style.transform = "";
+    };
+    sheetEl.addEventListener("touchend", end);
+    sheetEl.addEventListener("touchcancel", end);
+  })();
 
   // ---------------- router ----------------
   const view = document.getElementById("view");
   const titleEl = document.getElementById("topbarTitle");
   const actionEl = document.getElementById("topbarAction");
   const tabbar = document.getElementById("tabbar");
-  const TITLES = { home: "Overview", log: "New Purchase", cards: "My Cards", history: "Activity", more: "Settings" };
+  const TITLES = { home: "Overview", log: "New Purchase", cards: "My Cards", history: "Activity", mcc: "MCC Lookup", more: "Settings" };
   let tab = "home";
   let histFilter = "all";
 
@@ -433,7 +566,7 @@
   function render() {
     recompute();
     actionEl.hidden = tab !== "cards";
-    ({ home: renderHome, log: renderLog, cards: renderCards, history: renderHistory, more: renderMore }[tab])();
+    ({ home: renderHome, log: renderLog, cards: renderCards, history: renderHistory, mcc: renderMccTab, more: renderMore }[tab])();
   }
 
   // ================= HOME =================
@@ -617,12 +750,19 @@
       const pv = document.getElementById("pv");
       if (!card || amt <= 0) { pv.innerHTML = ""; return; }
       const q = quote(card, draft.mcc, amt, draft.date);
-      const cls = q.capped ? "capped" : q.rule ? "" : "base";
+      const cls = q.pending ? "capped" : q.capped ? "capped" : q.rule ? "" : "base";
       let note;
-      if (!q.rule) {
+      if (q.pending) {
+        note = `This card needs ${money(card.cardCap.minSpend)} of spending per cycle before any cash back pays out. ` +
+          `<b>${money(q.shortfall)}</b> more to go — this purchase would then be worth ${money(q.potential)}.`;
+      } else if (!q.rule) {
         note = q.rate > 0
           ? `No cash back category on this card matches — earning the ${q.rate}% base rate.`
           : `This card pays no cash back on this category.`;
+      } else if (q.txnLimited) {
+        const lim = amt >= q.rule.txnCap.tierAt ? q.rule.txnCap.above : q.rule.txnCap.below;
+        note = `<b>${esc(ruleLabel(q.rule))}</b> pays ${q.rate}%, but this card caps a single transaction at ${money(lim)} ` +
+          `(purchases under ${money(q.rule.txnCap.tierAt)} cap at ${money(q.rule.txnCap.below)}).`;
       } else if (q.capped) {
         note = `Cap reached on <b>${esc(ruleLabel(q.rule))}</b>. Part of this purchase earns ${q.rate}%, the rest drops to the ${q.baseRate}% base rate.`;
       } else {
@@ -631,7 +771,10 @@
           (q.remaining != null ? ` ${money(Math.max(0, q.remaining - (q.rule.cap.type === "spend" ? amt : q.cashback)))} of cap left this ${unit}.` : "");
       }
       pv.innerHTML = `<div class="preview ${cls}">
-        <div class="pv-top"><span class="pv-amt num">${money(q.cashback)}</span><span class="pv-rate">${q.rate}% ${q.capped ? "(capped)" : ""}</span></div>
+        <div class="pv-top">
+          <span class="pv-amt num">${money(q.cashback)}</span>
+          <span class="pv-rate">${q.pending ? "pending" : q.rate + "%" + (q.capped ? " (capped)" : "")}</span>
+        </div>
         <div class="pv-note">${note}</div>
       </div>`;
     }
@@ -724,12 +867,16 @@
       </div>`;
     }
 
+    const cancel = () => { if (opts.onCancel) opts.onCancel(); else closeSheet(); };
+
     openSheet(`
       <h2>${multi ? "Select MCC codes" : "Merchant category"}</h2>
       <div class="sticky-search"><input id="mccSearch" type="search" placeholder="Search name or code (e.g. 5812)" autocomplete="off" /></div>
       <div id="mccList">${body("")}</div>
       ${multi ? `<button class="btn btn-primary" id="mccDone" style="position:sticky;bottom:0;margin-top:14px;">Use ${selected.size} code(s)</button>` : ""}
-    `);
+      <button class="btn btn-ghost" id="mccCancel">Cancel</button>
+    `, cancel);
+    document.getElementById("mccCancel").addEventListener("click", cancel);
 
     const list = document.getElementById("mccList");
     const search = document.getElementById("mccSearch");
@@ -885,7 +1032,7 @@
       const row = e.target.closest("[data-bank]");
       if (row) openBankCards(row.dataset.bank);
     });
-    document.getElementById("blankCard").addEventListener("click", () => openCardDetailsForm(null, null, null));
+    document.getElementById("blankCard").addEventListener("click", () => openCardDetailsForm(null, null));
   }
 
   function openBankCards(bankId) {
@@ -894,12 +1041,13 @@
     openSheet(`
       <h2>${esc(bank.name)}</h2>
       <div class="sheet-sub">Templates are starting points — check your card's real terms and edit the rates after.</div>
-      ${bank.cards.map(([name, tpl], i) => {
-        const t = tpl ? CARD_TEMPLATES[tpl] : null;
-        const preview = t ? t.rules.map((r) => `${groupName(r.g)} ${r.rate}%`).join(" · ") : "No rules — add your own";
+      ${bank.note ? `<div class="hint" style="margin:-8px 0 14px;">${esc(bank.note)}</div>` : ""}
+      ${bank.cards.map((c, i) => {
+        const first = (c.rules || [])[0];
+        const icon = first ? (first.g ? groupIcon(first.g) : mccInfo(first.mcc[0]).icon) : "✎";
         return `<div class="row" data-cardidx="${i}">
-          <div class="glyph">${t ? groupIcon(t.rules[0].g) : "✎"}</div>
-          <div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(preview)}</div></div>
+          <div class="glyph">${icon}</div>
+          <div class="body"><div class="t1">${esc(c.name)}</div><div class="t2">${esc(c.sub || "")}</div></div>
           <div class="chev" style="color:var(--text-3);font-size:19px;">›</div>
         </div>`;
       }).join("")}
@@ -910,12 +1058,11 @@
       const row = e.target.closest("[data-cardidx]");
       if (!row) return;
       sheetEl.removeEventListener("click", onPick);
-      const [name, tpl] = bank.cards[Number(row.dataset.cardidx)];
-      openCardDetailsForm(bank, name, tpl);
+      openCardDetailsForm(bank, bank.cards[Number(row.dataset.cardidx)]);
     });
   }
 
-  function openCardDetailsForm(bank, cardName, tplId) {
+  function openCardDetailsForm(bank, entry) {
     // Keep cards visually distinct: if the bank's house colour is already on another
     // card, offer the next unused one instead.
     const used = new Set(state.cards.map((c) => c.gradient));
@@ -924,21 +1071,38 @@
       gradient = GRADIENT_KEYS.find((k) => !used.has(k)) || gradient;
     }
     const seed = {
-      name: cardName || "",
+      name: entry ? entry.name : "",
       issuer: bank ? (bank.id === "custom" ? "" : bank.name) : "",
       gradient
     };
-    const tpl = tplId ? CARD_TEMPLATES[tplId] : null;
+    const rules = entry ? (entry.rules || []) : [];
+    const cardCap = entry && entry.cardCap ? entry.cardCap : null;
+
     openSheet(`
       <h2>Card details</h2>
-      <div class="sheet-sub">${tpl ? "Cash back categories will be prefilled — edit them any time." : "You can add cash back categories next."}</div>
+      <div class="sheet-sub">${rules.length ? "Cash back categories will be prefilled — edit them any time." : "You can add cash back categories next."}</div>
       ${cardFormFields(seed, { showBase: false })}
-      ${tpl ? `<div class="section-title">Prefilled categories</div>
-        ${tpl.rules.map((r) => `<div class="row"><div class="glyph">${groupIcon(r.g)}</div>
-          <div class="body"><div class="t1">${esc(groupName(r.g))}</div>
-          <div class="t2">${r.cap ? "Cap " + money(r.cap[0]) + " / " + PERIOD_LABEL[r.cap[2]] : "No cap"}</div></div>
-          <div class="tail"><div class="a1" style="color:var(--gold);">${r.rate}%</div></div></div>`).join("")}
-        <div class="hint">These are typical values, not confirmed terms from your bank. Verify and adjust after adding.</div>` : ""}
+      ${rules.length ? `<div class="section-title">Prefilled categories</div>
+        ${rules.map((r) => {
+          const icon = r.g ? groupIcon(r.g) : mccInfo(r.mcc[0]).icon;
+          const scope = r.g ? groupName(r.g) : (r.mcc || []).join(", ");
+          return `<div class="row"><div class="glyph">${icon}</div>
+            <div class="body"><div class="t1">${esc(r.label || scope)}</div>
+            <div class="t2">${esc(scope)}${r.cap ? " · cap " + money(r.cap[0]) + "/" + PERIOD_LABEL[r.cap[2]] : ""}</div></div>
+            <div class="tail"><div class="a1" style="color:var(--gold);">${r.rate}%</div></div></div>`;
+        }).join("")}` : ""}
+      ${cardCap ? `<div class="section-title">Card-wide limits</div>
+        <div class="panel" style="margin-bottom:0;">
+          <div style="font-size:13.5px;line-height:1.6;color:var(--text-2);">
+            Max ${money(cardCap[0])} cash back per ${PERIOD_LABEL[cardCap[1]] === "mo" ? "month" : PERIOD_LABEL[cardCap[1]]}
+            ${cardCap[2] ? `<br>Requires ${money(cardCap[2])} of spending per cycle to qualify` : ""}
+          </div>
+        </div>` : ""}
+      ${entry && entry.tips && entry.tips.length ? `<div class="section-title">Good to know</div>
+        <div class="panel" style="margin-bottom:0;">
+          <ul class="tips">${entry.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
+        </div>` : ""}
+      ${rules.length || cardCap ? `<div class="hint" style="margin-top:14px;">Checked in August 2026, but issuers change terms often — confirm against your own card agreement and edit anything that differs.</div>` : ""}
       <button class="btn btn-primary" id="doAdd">Add Card</button>
       <button class="btn btn-ghost" id="backBanks2">‹ Back</button>
     `);
@@ -947,8 +1111,12 @@
     document.getElementById("doAdd").addEventListener("click", () => {
       const f = readCardForm();
       if (!f.name) { toast("Give the card a name"); return; }
-      const built = tplId ? buildTemplateRules(tplId, uid) : { baseRate: 0, rules: [] };
-      const card = Object.assign({ id: uid(), rules: built.rules }, f, { baseRate: built.baseRate });
+      const built = entry ? buildFromCatalog(entry, uid) : { baseRate: 0, rules: [], cardCap: null };
+      const card = Object.assign({ id: uid() }, f, {
+        baseRate: built.baseRate,
+        rules: built.rules,
+        cardCap: built.cardCap
+      });
       state.cards.push(card);
       save();
       takeSnapshot("card-added");
@@ -1017,6 +1185,32 @@
           <div class="t2">${due.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(due)}</div><div class="u">days</div></div></div>` : ""}` : ""}
 
+      ${card.cardCap ? (() => {
+        const u = cardCapUsage(card, todayStr()) || { used: 0, spend: 0 };
+        const unit = card.cardCap.period === "monthly" ? "month" : PERIOD_LABEL[card.cardCap.period];
+        let html = `<div class="section-title">Card-wide Limit</div>`;
+        if (card.cardCap.minSpend > 0) {
+          const pct = Math.min(100, (u.spend / card.cardCap.minSpend) * 100);
+          const met = u.spend >= card.cardCap.minSpend;
+          html += `<div class="cap-item">
+            <div class="cap-head"><span class="cap-name">Minimum spend to qualify</span>
+              <span class="cap-rate" style="color:${met ? "var(--mint)" : "var(--amber)"}">${met ? "met" : money(card.cardCap.minSpend - u.spend) + " to go"}</span></div>
+            <div class="cap-meta">${money(u.spend)} of ${money(card.cardCap.minSpend)} this ${unit}</div>
+            <div class="bar ${met ? "" : "warn"}"><i style="width:${pct}%"></i></div>
+          </div>`;
+        }
+        if (card.cardCap.amount > 0) {
+          const pct = Math.min(100, (u.used / card.cardCap.amount) * 100);
+          html += `<div class="cap-item">
+            <div class="cap-head"><span class="cap-name">Total cash back cap</span>
+              <span class="cap-rate">${money(card.cardCap.amount)}</span></div>
+            <div class="cap-meta">${money(u.used)} used this ${unit}</div>
+            <div class="bar ${pct >= 100 ? "full" : pct >= 75 ? "warn" : ""}"><i style="width:${pct}%"></i></div>
+          </div>`;
+        }
+        return html;
+      })() : ""}
+
       <div class="section-title">Bonus Rules <span class="link" data-action="add-rule" data-cardid="${card.id}">+ Add rule</span></div>
       ${rulesHtml}
 
@@ -1064,7 +1258,13 @@
               ${MCC_GROUPS.map((g) => `<option value="${g.id}" ${g.id === draftRule.groupId ? "selected" : ""}>${g.icon}  ${esc(g.name)}</option>`).join("")}
             </select>
           </div>
-          <div class="hint">Covers every MCC in the group — e.g. Dining includes 5812, 5814, 5813 and more.</div>
+          <div class="mcc-covers">
+            <div class="mcc-covers-h">This category covers these MCC codes</div>
+            <div class="mcc-covers-list">
+              ${(MCC_GROUPS.find((g) => g.id === draftRule.groupId) || { codes: [] }).codes
+                .map(([c, n]) => `<div class="mcc-cover"><span class="cc-code num">${c}</span><span class="cc-name">${esc(n)}</span></div>`).join("")}
+            </div>
+          </div>
         ` : `
           <div class="field">
             <label>MCC Codes</label>
@@ -1077,7 +1277,12 @@
               <span class="chev">›</span>
             </button>
           </div>
-          <div class="hint">Use this when a card bonuses only certain merchants, not the whole group.</div>
+          ${draftRule.mccCodes.length ? `<div class="mcc-covers">
+            <div class="mcc-covers-h">Selected codes</div>
+            <div class="mcc-covers-list">
+              ${draftRule.mccCodes.map((c) => `<div class="mcc-cover"><span class="cc-code num">${esc(c)}</span><span class="cc-name">${esc(mccInfo(c).name)}</span></div>`).join("")}
+            </div>
+          </div>` : `<div class="hint">Use this when a card bonuses only certain merchants, not the whole group.</div>`}
         `}
 
         <div class="row-2">
@@ -1146,16 +1351,20 @@
         readInputs();
         paint();
       });
-      ["r_capType", "r_capPeriod", "r_group"].forEach((id) => {
+      ["r_capType", "r_capPeriod"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.addEventListener("change", readInputs);
       });
+      // Repaint on group change so the "covers these MCC codes" list stays in sync.
+      const groupEl = document.getElementById("r_group");
+      if (groupEl) groupEl.addEventListener("change", () => { readInputs(); paint(); });
       wireMoneyInput(document.getElementById("r_capAmt"));
       const mccBtn = document.getElementById("r_mccBtn");
       if (mccBtn) {
         mccBtn.addEventListener("click", () => {
           readInputs();
-          openMccPicker((codes) => { draftRule.mccCodes = codes; paint(); }, { multi: true, selected: draftRule.mccCodes });
+          openMccPicker((codes) => { draftRule.mccCodes = codes; paint(); },
+            { multi: true, selected: draftRule.mccCodes, onCancel: () => paint() });
         });
       }
 
@@ -1213,12 +1422,12 @@
       html += `<div class="row" data-action="open-txn" data-id="${t.id}">
         <div class="glyph">${info.icon}</div>
         <div class="body">
-          <div class="t1">${esc(t.note || info.name)}${t._capped ? '<span class="tag cap">CAP</span>' : ""}</div>
+          <div class="t1">${esc(t.note || info.name)}${t._pending ? '<span class="tag pend">PENDING</span>' : t._capped ? '<span class="tag cap">CAP</span>' : ""}</div>
           <div class="t2">${card ? esc(card.name) : "Deleted card"} · ${dateLabel(t.date)} <span class="tag mcc">${esc(t.mcc)}</span></div>
         </div>
         <div class="tail">
           <div class="a1 num">${money(t.amount)}</div>
-          <div class="a2 num">+${money(t._cb)} · ${t._rate}%</div>
+          <div class="a2 num" ${t._pending ? 'style="color:var(--amber)"' : ""}>${t._pending ? "min spend not met" : "+" + money(t._cb) + " · " + t._rate + "%"}</div>
         </div>
       </div>`;
     }
@@ -1260,7 +1469,8 @@
       wireMoneyInput(document.getElementById("e_amount"));
       document.getElementById("e_mcc").addEventListener("click", () => {
         t.amount = parseVnd(document.getElementById("e_amount").value) || t.amount;
-        openMccPicker((code) => { mcc = code; paint(); });
+        // Cancelling must return to the edit sheet, not throw the whole edit away.
+        openMccPicker((code) => { mcc = code; paint(); }, { onCancel: () => paint() });
       });
       document.getElementById("e_save").addEventListener("click", () => {
         const amt = parseVnd(document.getElementById("e_amount").value);
@@ -1279,6 +1489,91 @@
       });
     }
     paint();
+  }
+
+  // ================= MCC LOOKUP =================
+  let mccQuery = "";
+  let mccOpenGroup = null;
+
+  /* Which of your cards pays the most on a given MCC — the practical question
+     behind "what MCC is this merchant?". */
+  function bestCardFor(mcc) {
+    if (!state.cards.length) return null;
+    const ranked = state.cards
+      .map((c) => ({ card: c, q: quote(c, mcc, 1000000, todayStr()) }))
+      .sort((a, b) => b.q.cashback - a.q.cashback);
+    return ranked[0].q.rate > 0 ? ranked[0] : null;
+  }
+
+  function renderMccTab() {
+    const q = mccQuery.trim().toLowerCase();
+    let body = "";
+
+    if (q) {
+      const hits = [];
+      for (const g of MCC_GROUPS) {
+        for (const [code, name] of g.codes) {
+          if (code.includes(q) || name.toLowerCase().includes(q) || g.name.toLowerCase().includes(q)) {
+            hits.push({ code, name, group: g });
+          }
+        }
+      }
+      body = hits.length
+        ? hits.map((h) => mccResultRow(h.code, h.name, h.group)).join("")
+        : `<div class="empty">No MCC matches “${esc(mccQuery)}”.<br>Try a merchant type like “hotel” or a code like “5812”.</div>`;
+    } else {
+      body = MCC_GROUPS.map((g) => `
+        <div class="mcc-group ${mccOpenGroup === g.id ? "open" : ""}">
+          <button class="mcc-group-head" data-group="${g.id}">
+            <span class="gi">${g.icon}</span>
+            <span class="gn">${esc(g.name)}</span>
+            <span class="gc num">${g.codes.length}</span>
+            <span class="gx">${mccOpenGroup === g.id ? "−" : "+"}</span>
+          </button>
+          ${mccOpenGroup === g.id ? `<div class="mcc-group-body">${g.codes.map(([c, n]) => mccResultRow(c, n, g)).join("")}</div>` : ""}
+        </div>`).join("");
+    }
+
+    view.innerHTML = `
+      <div class="sticky-search" style="background:linear-gradient(180deg,var(--bg) 70%,transparent);padding-top:2px;">
+        <input id="mccTabSearch" type="search" placeholder="Search merchant type or MCC code" value="${esc(mccQuery)}" autocomplete="off" />
+      </div>
+      <div class="hint" style="margin:2px 4px 12px;">
+        Merchant Category Codes decide which cash back rule a purchase hits. Look one up to see
+        which of your cards pays best on it.
+      </div>
+      ${body}
+    `;
+
+    const s = document.getElementById("mccTabSearch");
+    s.addEventListener("input", () => {
+      mccQuery = s.value;
+      const pos = s.selectionStart;
+      renderMccTab();
+      const ns = document.getElementById("mccTabSearch");
+      ns.focus();
+      try { ns.setSelectionRange(pos, pos); } catch (e) {}
+    });
+    view.querySelectorAll("[data-group]").forEach((b) => {
+      b.addEventListener("click", () => {
+        mccOpenGroup = mccOpenGroup === b.dataset.group ? null : b.dataset.group;
+        renderMccTab();
+      });
+    });
+  }
+
+  function mccResultRow(code, name, group) {
+    const best = bestCardFor(code);
+    return `<div class="row row-mcc">
+      <div class="glyph">${group.icon}</div>
+      <div class="body">
+        <div class="t1">${esc(name)}</div>
+        <div class="t2">${best
+          ? `<b style="color:var(--mint)">${best.q.rate}%</b> on ${esc(best.card.name)}`
+          : state.cards.length ? "No cash back on your cards" : esc(group.name)}</div>
+      </div>
+      <div class="mcc-code num">${esc(code)}</div>
+    </div>`;
   }
 
   // ================= MORE / SETTINGS =================
