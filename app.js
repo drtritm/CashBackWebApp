@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.1.0";
+  const APP_VERSION = "1.2.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -39,8 +39,15 @@
     gold:      ["#8a6b34", "#2f2210"],
     champagne: ["#7d6a4a", "#282116"],
     steel:     ["#3f5563", "#121a20"],
-    ink:       ["#2c2f4a", "#0d0e1a"]
+    ink:       ["#2c2f4a", "#0d0e1a"],
+    // Titanium black and pearl white — the two finishes premium physical cards use.
+    onyx:      ["#26282d", "#020203"],
+    platinum:  ["#fbfaf7", "#dcdad3"]
   };
+  // Light finishes need dark text and inverted overlay tints — everything else assumes white text.
+  const LIGHT_GRADIENTS = new Set(["platinum"]);
+  const isLightGradient = (key) => LIGHT_GRADIENTS.has(key);
+  const ccClass = (key) => "cc" + (isLightGradient(key) ? " cc-light" : "");
   const GRADIENT_KEYS = Object.keys(GRADIENTS);
 
   // ---------------- state ----------------
@@ -738,7 +745,7 @@
       .sort((a, b) => cardTotals(b.id).cashback - cardTotals(a.id).cashback)
       .map((c) => {
         const t = cardTotals(c.id);
-        return `<div class="cc" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
+        return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
           <div class="cc-head">
             <div>
               ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
@@ -1006,7 +1013,7 @@
       <div class="sheet-sub">${esc(info.name)} · MCC ${esc(info.code)} · ${money(amt)}</div>
       ${ranked.map((r, i) => `
         <div class="row">
-          <div class="glyph" style="background:linear-gradient(140deg,${grad(r.card.gradient)[0]},${grad(r.card.gradient)[1]});border:none;font-size:13px;font-weight:700;">${i === 0 ? "★" : i + 1}</div>
+          <div class="glyph" style="background:${gradCss(r.card.gradient)};border:none;font-size:13px;font-weight:700;color:${isLightGradient(r.card.gradient) ? "#201f1c" : "#fff"};">${i === 0 ? "★" : i + 1}</div>
           <div class="body">
             <div class="t1">${esc(r.card.name)}</div>
             <div class="t2">${esc(ruleLabel(r.q.rule))} · ${r.q.rate}%${r.q.capped ? " · cap reached" : ""}</div>
@@ -1109,7 +1116,7 @@
       <div class="card-stack">${state.cards.map((c) => {
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
-      return `<div class="cc" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
+      return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
         <div class="cc-head">
           <div>
             ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
@@ -1349,7 +1356,7 @@
       : `<div class="empty" style="padding:26px 12px;">No bonus rules yet.<br>Everything earns the ${card.baseRate}% base rate.</div>`;
 
     openSheet(`
-      <div class="cc" style="${gradStyle(card.gradient)};margin-bottom:18px;">
+      <div class="${ccClass(card.gradient)}" style="${gradStyle(card.gradient)};margin-bottom:18px;">
         <div class="cc-head">
           <div>${card.issuer ? `<div class="cc-issuer">${esc(card.issuer)}</div>` : ""}
           <div class="cc-name">${esc(card.name)}</div></div>
