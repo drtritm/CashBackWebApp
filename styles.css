@@ -112,6 +112,27 @@ body::before {
 }
 .section-title:first-child { margin-top: 8px; }
 .section-title .link { color: var(--gold); text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 620; }
+.section-title .title-links { display: flex; align-items: center; gap: 14px; }
+
+/* ---------- reorder mode ---------- */
+.reorder-row { padding-right: 8px; }
+.reorder-btns { display: flex; flex-direction: column; gap: 4px; margin-left: 8px; }
+.reorder-btn {
+  width: 30px; height: 26px; border-radius: 8px; border: 1px solid var(--hairline-soft);
+  background: var(--surface-2); color: var(--text-2); font-size: 11px; line-height: 1;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.reorder-btn:active { background: var(--hairline); }
+.reorder-btn:disabled { opacity: 0.3; }
+.card-stack.reorder .cc-holo,
+.card-stack.reorder .cc-chip { opacity: 0.35; }
+.cc-reorder-btns {
+  position: absolute; top: 14px; right: 14px; display: flex; gap: 6px; z-index: 2;
+}
+.cc-reorder-btns .reorder-btn {
+  width: 34px; height: 30px; background: rgba(0,0,0,0.35); border-color: rgba(255,255,255,0.18); color: #fff;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
 
 .num { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 

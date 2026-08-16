@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.5.0";
+  const APP_VERSION = "1.6.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -806,8 +806,27 @@
   };
   let tab = "home";
   let histFilter = "all";
+  // Reorder mode is tracked separately per screen since Home and Cards render
+  // the card list differently, but both write to the same state.cards order.
+  let reorderHome = false;
+  let reorderCards = false;
+
+  /* Swap a card with its neighbour in state.cards — the single order both the
+     Overview and Cards tabs read from. */
+  function moveCard(id, dir) {
+    const idx = state.cards.findIndex((c) => c.id === id);
+    if (idx < 0) return;
+    const j = idx + dir;
+    if (j < 0 || j >= state.cards.length) return;
+    [state.cards[idx], state.cards[j]] = [state.cards[j], state.cards[idx]];
+    save();
+    render();
+  }
 
   function go(t) {
+    // Leaving a screen exits its reorder mode so it doesn't linger next visit.
+    if (t !== "home") reorderHome = false;
+    if (t !== "cards") reorderCards = false;
     tab = t;
     titleEl.textContent = TITLES[t];
     [...tabbar.children].forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
@@ -873,10 +892,26 @@
 
     // Compact rows, not full card art — with many cards this needs to scan in a
     // glance, not scroll through a stack of full-size faces (that's what Cards is for).
-    const cardsHtml = [...state.cards]
-      .sort((a, b) => cardTotals(b.id).monthCashback - cardTotals(a.id).monthCashback)
-      .map((c) => {
+    // Reordering pins the list to your own order; otherwise it's sorted by this
+    // month's cash back so the card doing the most work floats to the top.
+    const orderedCards = reorderHome
+      ? state.cards
+      : [...state.cards].sort((a, b) => cardTotals(b.id).monthCashback - cardTotals(a.id).monthCashback);
+    const cardsHtml = orderedCards.map((c, i) => {
         const t = cardTotals(c.id);
+        if (reorderHome) {
+          return `<div class="row card-mini reorder-row">
+            <div class="cm-swatch" style="background:${gradCss(c.gradient)}"><span class="cm-chip"></span></div>
+            <div class="body">
+              <div class="t1">${esc(c.name)}</div>
+              <div class="t2">${c.issuer ? esc(c.issuer) + " · " : ""}${t.count} purchase${t.count === 1 ? "" : "s"}</div>
+            </div>
+            <div class="reorder-btns">
+              <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
+              <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="1" ${i === orderedCards.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>
+            </div>
+          </div>`;
+        }
         return `<div class="row card-mini" data-action="open-card" data-id="${c.id}">
           <div class="cm-swatch" style="background:${gradCss(c.gradient)}"><span class="cm-chip"></span></div>
           <div class="body">
@@ -913,7 +948,12 @@
         <div class="stat"><div class="k">Cash spend · month</div><div class="v num">${money(mCash)}</div></div>
       </div>
       ${alertsHtml}
-      <div class="section-title">Cards <span class="link" data-action="goto-cards">See all ›</span></div>
+      <div class="section-title">Cards
+        <span class="title-links">
+          ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-home">${reorderHome ? "Done" : "Reorder"}</span>` : ""}
+          ${reorderHome ? "" : `<span class="link" data-action="goto-cards">See all ›</span>`}
+        </span>
+      </div>
       ${cardsHtml}
     `;
   }
@@ -1363,11 +1403,17 @@
           <div class="item"><div class="k">Lifetime</div><div class="v num">${moneyShort(lifetimeCb)}</div></div>
         </div>
       </div>
-      <div class="section-title">Your Cards</div>
-      <div class="card-stack">${state.cards.map((c) => {
+      <div class="section-title">Your Cards
+        ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-cards">${reorderCards ? "Done" : "Reorder"}</span>` : ""}
+      </div>
+      <div class="card-stack ${reorderCards ? "reorder" : ""}">${state.cards.map((c, i) => {
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
-      return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" data-action="open-card" data-id="${c.id}">
+      return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" ${reorderCards ? "" : `data-action="open-card" data-id="${c.id}"`}>
+        ${reorderCards ? `<div class="cc-reorder-btns">
+          <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
+          <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="1" ${i === state.cards.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>
+        </div>` : ""}
         <div class="cc-holo"></div>
         <div class="cc-head">
           <div>
@@ -2400,6 +2446,14 @@
       go("stats");
     } else if (a === "goto-cards") {
       go("cards");
+    } else if (a === "toggle-reorder-home") {
+      reorderHome = !reorderHome;
+      render();
+    } else if (a === "toggle-reorder-cards") {
+      reorderCards = !reorderCards;
+      render();
+    } else if (a === "move-card") {
+      moveCard(el.dataset.id, Number(el.dataset.dir));
     } else if (a === "stats-range") {
       statsRange = el.dataset.v;
       renderStats();

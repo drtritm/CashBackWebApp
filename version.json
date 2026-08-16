@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "released": "2026-08-16",
-  "notes": "Added Shinhan Bank My Life (3tr minimum spend to unlock 10% categories) and MB Bank JCB Platinum (2tr Shopee spend to unlock 10% Shopee cash back). New rule-level minimum-spend threshold, editable on any custom rule."
+  "notes": "You can now reorder your cards — tap Reorder on the Overview or Cards tab and use the arrows to set your own order, which is shared between both screens."
 }
