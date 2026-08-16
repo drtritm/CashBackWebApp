@@ -1,5 +1,5 @@
 {
-  "version": "1.6.1",
+  "version": "1.7.0",
   "released": "2026-08-16",
-  "notes": "Reordering cards is now a single press-and-drag gesture — press the handle, drag to where you want it, let go. Replaces the old repeated-tap arrows on Overview and Cards."
+  "notes": "Upcoming on Overview now only flags payments due within 5 days. Mark a card Paid from its detail sheet — it clears the reminder and shows a Paid badge on the Cards tab until the next due date rolls around. Activity gets Prev/Next month navigation instead of one long scroll."
 }

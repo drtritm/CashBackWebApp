@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.6.1";
+  const APP_VERSION = "1.7.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -93,7 +93,6 @@
      them as a boxed placeholder that reads as a broken/error icon). */
   const ICON_STATEMENT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg>';
   const ICON_DUE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6.5" width="18" height="12" rx="2.2"/><path d="M3 10.5h18"/><circle cx="17" cy="14.7" r="1" fill="currentColor" stroke="none"/></svg>';
-  const alertIcon = (kind) => (kind === "due" ? ICON_DUE : ICON_STATEMENT);
 
   /* Grouped like a real embossed card number — only the last 4 digits are ever
      known, everything before them stays masked. */
@@ -467,6 +466,37 @@
     const now = new Date(); now.setHours(0, 0, 0, 0);
     return Math.round((d - now) / 86400000);
   }
+  const isoDate = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+
+  /* "Paid" is tracked against a specific upcoming due date, not just a flag —
+     so it automatically clears itself once that due date passes and the next
+     billing cycle rolls a new one in, with no reset code needed anywhere. */
+  function dueDateKey(card) {
+    if (!card.dueDay) return null;
+    const d = nextOccurrence(card.dueDay);
+    return d ? isoDate(d) : null;
+  }
+  function isCardPaid(card) {
+    const key = dueDateKey(card);
+    return !!(key && card.paidThroughDue === key);
+  }
+  function togglePaid(cardId) {
+    const card = getCard(cardId);
+    if (!card) return;
+    const key = dueDateKey(card);
+    if (!key) return;
+    card.paidThroughDue = isCardPaid(card) ? null : key;
+    save();
+  }
+  /* Small status pill shown on the Cards tab — confirms a marked-paid card at
+     a glance, or flags one whose due date is inside the 5-day reminder window. */
+  function dueBadgeHtml(card) {
+    if (!card.dueDay) return "";
+    if (isCardPaid(card)) return `<span class="due-badge paid">✓ Paid</span>`;
+    const n = daysUntil(nextOccurrence(card.dueDay));
+    if (n > 5) return "";
+    return `<span class="due-badge ${n <= 1 ? "urgent" : "warn"}">Due ${n <= 0 ? "today" : "in " + n + "d"}</span>`;
+  }
 
   // ---------------- cash back engine ----------------
   /* A specific-MCC rule always beats a group rule; ties break on the higher rate. */
@@ -806,10 +836,25 @@
   };
   let tab = "home";
   let histFilter = "all";
+  // "all" shows the full timeline (unchanged default); a "YYYY-MM" key narrows
+  // Activity to one billing month, stepped through with the Prev/Next arrows.
+  let histMonth = "all";
   // Reorder mode is tracked separately per screen since Home and Cards render
   // the card list differently, but both write to the same state.cards order.
   let reorderHome = false;
   let reorderCards = false;
+
+  /* Step Activity's month filter. dir=1 moves further into the past, dir=-1
+     moves back toward the present and eventually to "all". Only steps through
+     months that actually have a transaction under the current card/cash filter. */
+  function histMonthStep(dir) {
+    const scoped = state.transactions.filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter));
+    const monthKeys = [...new Set(scoped.map((t) => t.date.slice(0, 7)))].sort().reverse();
+    let idx = histMonth === "all" ? -1 : monthKeys.indexOf(histMonth);
+    idx = Math.max(-1, Math.min(monthKeys.length - 1, idx + dir));
+    histMonth = idx === -1 ? "all" : monthKeys[idx];
+    render();
+  }
 
   /* Move a card straight to a destination index in state.cards — the single
      order both the Overview and Cards tabs read from. */
@@ -954,29 +999,25 @@
     // Effective rate only makes sense against spending that could earn anything.
     const effective = mCard > 0 ? (mCb / mCard) * 100 : 0;
 
-    // Billing reminders
+    // Billing reminders — only payments due within 5 days, and only while
+    // still unpaid (mark a card paid in its detail sheet to clear it here).
     const alerts = [];
     for (const c of state.cards) {
-      if (c.statementDay) {
-        const d = nextOccurrence(c.statementDay), n = daysUntil(d);
-        if (n <= 10) alerts.push({ n, kind: "close", card: c, date: d });
-      }
-      if (c.dueDay) {
-        const d = nextOccurrence(c.dueDay), n = daysUntil(d);
-        if (n <= 10) alerts.push({ n, kind: "due", card: c, date: d });
-      }
+      if (!c.dueDay || isCardPaid(c)) continue;
+      const d = nextOccurrence(c.dueDay), n = daysUntil(d);
+      if (n <= 5) alerts.push({ n, card: c, date: d });
     }
     alerts.sort((a, b) => a.n - b.n);
 
     const alertsHtml = alerts.length
       ? `<div class="section-title">Upcoming</div>` + alerts.map((a) => `
-        <div class="alert ${a.kind === "due" ? (a.n <= 5 ? "due-soon" : "") : (a.n <= 3 ? "close-soon" : "")}">
-          <div class="ic">${alertIcon(a.kind)}</div>
+        <div class="alert ${a.n <= 1 ? "due-soon" : ""}" data-action="open-card" data-id="${a.card.id}">
+          <div class="ic">${ICON_DUE}</div>
           <div class="body">
             <div class="t1">${esc(a.card.name)}</div>
-            <div class="t2">${a.kind === "due" ? "Payment due" : "Statement closes"} · ${a.date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</div>
+            <div class="t2">Payment due · ${a.date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</div>
           </div>
-          <div class="cnt"><div class="n num">${a.n === 0 ? "today" : a.n}</div>${a.n === 0 ? "" : `<div class="u">day${a.n === 1 ? "" : "s"}</div>`}</div>
+          <div class="cnt"><div class="n num">${a.n <= 0 ? "today" : a.n}</div>${a.n <= 0 ? "" : `<div class="u">day${a.n === 1 ? "" : "s"}</div>`}</div>
         </div>`).join("")
       : "";
 
@@ -1506,6 +1547,7 @@
           <div>
             ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
             <div class="cc-name">${esc(c.name)}</div>
+            ${dueBadgeHtml(c) ? `<div style="margin-top:7px;">${dueBadgeHtml(c)}</div>` : ""}
           </div>
           <div class="cc-chip"></div>
         </div>
@@ -1774,9 +1816,12 @@
         ${stmt ? `<div class="alert"><div class="ic">${ICON_STATEMENT}</div><div class="body"><div class="t1">Statement closes</div>
           <div class="t2">${stmt.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(stmt)}</div><div class="u">days</div></div></div>` : ""}
-        ${due ? `<div class="alert ${daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">${ICON_DUE}</div><div class="body"><div class="t1">Payment due</div>
-          <div class="t2">${due.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
-          <div class="cnt"><div class="n num">${daysUntil(due)}</div><div class="u">days</div></div></div>` : ""}` : ""}
+        ${due ? `<div class="alert ${isCardPaid(card) ? "" : daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">${ICON_DUE}</div><div class="body"><div class="t1">Payment due</div>
+          <div class="t2">${due.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}${isCardPaid(card) ? " · <span style=\"color:var(--mint)\">paid</span>" : ""}</div></div>
+          <div class="cnt"><div class="n num">${daysUntil(due)}</div><div class="u">days</div></div></div>
+          <button class="btn ${isCardPaid(card) ? "btn-ghost" : "btn-primary"}" data-action="toggle-paid" data-id="${card.id}" style="margin:-4px 0 4px;">
+            ${isCardPaid(card) ? "✓ Paid this cycle — tap to undo" : "Mark as Paid"}
+          </button>` : ""}` : ""}
 
       ${card.cardCap ? (() => {
         const u = cardCapUsage(card, todayStr()) || { used: 0, spend: 0 };
@@ -2021,14 +2066,25 @@
       '<button class="chip ' + (histFilter === "cash" ? "active" : "") + '" data-action="filter" data-id="cash">💵 Cash</button>' +
       '</div>';
 
-    const list = state.transactions
-      .filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter))
+    const scoped = state.transactions.filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter));
+    const monthKeys = [...new Set(scoped.map((t) => t.date.slice(0, 7)))].sort().reverse();
+    if (histMonth !== "all" && !monthKeys.includes(histMonth)) histMonth = "all";
+    const navIdx = histMonth === "all" ? -1 : monthKeys.indexOf(histMonth);
+    const canOlder = navIdx < monthKeys.length - 1;
+    const canNewer = navIdx > -1;
+    const monthNav = monthKeys.length ? `<div class="month-nav">
+        <button class="month-nav-btn" data-action="hist-month" data-dir="1" ${canOlder ? "" : "disabled"} aria-label="Older month">‹</button>
+        <div class="month-nav-label">${histMonth === "all" ? "All time" : monthLabel(histMonth)}</div>
+        <button class="month-nav-btn" data-action="hist-month" data-dir="-1" ${canNewer ? "" : "disabled"} aria-label="Newer month">›</button>
+      </div>` : "";
+
+    const list = (histMonth === "all" ? scoped : scoped.filter((t) => t.date.slice(0, 7) === histMonth))
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)));
 
-    if (!list.length) return void (view.innerHTML = chips + '<div class="empty">Nothing logged here yet.</div>');
+    if (!list.length) return void (view.innerHTML = chips + monthNav + '<div class="empty">Nothing logged here yet.</div>');
 
     // Grouped month → day, each header carrying its own totals.
-    let html = chips, lastMonth = null, lastDay = null;
+    let html = chips + monthNav, lastMonth = null, lastDay = null;
     for (const t of list) {
       const mk = t.date.slice(0, 7);
       if (mk !== lastMonth) {
@@ -2493,7 +2549,14 @@
     else if (a === "add-rule") openRuleEditor(el.dataset.cardid, null);
     else if (a === "edit-rule") openRuleEditor(el.dataset.cardid, el.dataset.ruleid);
     else if (a === "open-txn") openTxn(el.dataset.id);
-    else if (a === "filter") { histFilter = el.dataset.id; render(); }
+    else if (a === "toggle-paid") {
+      togglePaid(el.dataset.id);
+      toast(isCardPaid(getCard(el.dataset.id)) ? "Marked as paid" : "Marked as unpaid");
+      render();
+      openCardDetail(el.dataset.id);
+    }
+    else if (a === "filter") { histFilter = el.dataset.id; histMonth = "all"; render(); }
+    else if (a === "hist-month") histMonthStep(Number(el.dataset.dir));
     else if (a === "save-card") {
       const c = getCard(el.dataset.id);
       const f = readCardForm(c);
