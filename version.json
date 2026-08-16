@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "1.6.1",
   "released": "2026-08-16",
-  "notes": "You can now reorder your cards — tap Reorder on the Overview or Cards tab and use the arrows to set your own order, which is shared between both screens."
+  "notes": "Reordering cards is now a single press-and-drag gesture — press the handle, drag to where you want it, let go. Replaces the old repeated-tap arrows on Overview and Cards."
 }

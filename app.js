@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.6.0";
+  const APP_VERSION = "1.6.1";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -811,16 +811,106 @@
   let reorderHome = false;
   let reorderCards = false;
 
-  /* Swap a card with its neighbour in state.cards — the single order both the
-     Overview and Cards tabs read from. */
-  function moveCard(id, dir) {
+  /* Move a card straight to a destination index in state.cards — the single
+     order both the Overview and Cards tabs read from. */
+  function reorderCardTo(id, targetIndex) {
     const idx = state.cards.findIndex((c) => c.id === id);
     if (idx < 0) return;
-    const j = idx + dir;
-    if (j < 0 || j >= state.cards.length) return;
-    [state.cards[idx], state.cards[j]] = [state.cards[j], state.cards[idx]];
+    const clamped = Math.max(0, Math.min(state.cards.length - 1, targetIndex));
+    if (clamped === idx) return;
+    const [moved] = state.cards.splice(idx, 1);
+    state.cards.splice(clamped, 0, moved);
     save();
     render();
+  }
+
+  const DRAG_HANDLE_SVG = `<svg viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
+    <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
+    <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
+  </svg>`;
+
+  /* Press-and-drag reordering for a vertical list of items, each carrying a
+     [data-drag-id] and a .drag-handle child. One continuous pointer gesture —
+     press the handle, drag to the destination, release — drops the item there
+     directly, rather than needing repeated taps to walk it into place.
+     Siblings animate out of the way live so the drop slot is obvious mid-drag;
+     the actual state.cards mutation only happens once, on release. */
+  function wireDragReorder(container, onDrop) {
+    if (!container) return;
+    let dragEl = null, items = [], startY = 0, rowH = 0, originalIndex = 0, targetIndex = 0;
+    let handle = null;
+
+    function itemsOf() {
+      return [...container.children].filter((el) => el.dataset && el.dataset.dragId);
+    }
+
+    function onMove(e) {
+      if (!dragEl) return;
+      e.preventDefault();
+      const deltaY = e.clientY - startY;
+      dragEl.style.transform = `translateY(${deltaY}px)`;
+      const centerY = dragStartCenter + deltaY;
+      let slot = Math.round((centerY - listFirstCenter) / rowH);
+      slot = Math.max(0, Math.min(items.length - 1, slot));
+      if (slot !== targetIndex) {
+        targetIndex = slot;
+        items.forEach((it, idx) => {
+          if (it === dragEl) return;
+          let shift = 0;
+          if (idx > originalIndex && idx <= targetIndex) shift = -rowH;
+          else if (idx < originalIndex && idx >= targetIndex) shift = rowH;
+          it.style.transform = shift ? `translateY(${shift}px)` : "";
+        });
+      }
+    }
+
+    let dragStartCenter = 0, listFirstCenter = 0;
+
+    function endDrag(e) {
+      if (!dragEl) return;
+      if (handle) {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", endDrag);
+        handle.removeEventListener("pointercancel", endDrag);
+      }
+      const el = dragEl, finalIndex = targetIndex, id = dragEl.dataset.dragId;
+      el.classList.remove("dragging");
+      el.style.transform = "";
+      container.classList.remove("reordering");
+      items.forEach((it) => { if (it !== el) it.style.transform = ""; });
+      dragEl = null;
+      if (finalIndex !== originalIndex) onDrop(id, finalIndex);
+    }
+
+    container.addEventListener("pointerdown", (e) => {
+      const h = e.target.closest(".drag-handle");
+      if (!h || !container.contains(h)) return;
+      const item = h.closest("[data-drag-id]");
+      if (!item) return;
+      e.preventDefault();
+      items = itemsOf();
+      originalIndex = items.indexOf(item);
+      if (originalIndex < 0) return;
+      dragEl = item;
+      handle = h;
+      const rect = item.getBoundingClientRect();
+      // Spacing between items (gap/margin included) beats bare offsetHeight,
+      // which would ignore the gap between rows/cards.
+      rowH = items.length > 1
+        ? (items[1].getBoundingClientRect().top - items[0].getBoundingClientRect().top)
+        : rect.height;
+      dragStartCenter = rect.top + rect.height / 2;
+      listFirstCenter = items[0].getBoundingClientRect().top + rowH / 2;
+      startY = e.clientY;
+      targetIndex = originalIndex;
+      item.classList.add("dragging");
+      container.classList.add("reordering");
+      try { h.setPointerCapture(e.pointerId); } catch (err) {}
+      h.addEventListener("pointermove", onMove);
+      h.addEventListener("pointerup", endDrag);
+      h.addEventListener("pointercancel", endDrag);
+    });
   }
 
   function go(t) {
@@ -897,19 +987,16 @@
     const orderedCards = reorderHome
       ? state.cards
       : [...state.cards].sort((a, b) => cardTotals(b.id).monthCashback - cardTotals(a.id).monthCashback);
-    const cardsHtml = orderedCards.map((c, i) => {
+    const cardsHtml = orderedCards.map((c) => {
         const t = cardTotals(c.id);
         if (reorderHome) {
-          return `<div class="row card-mini reorder-row">
+          return `<div class="row card-mini reorder-row" data-drag-id="${c.id}">
             <div class="cm-swatch" style="background:${gradCss(c.gradient)}"><span class="cm-chip"></span></div>
             <div class="body">
               <div class="t1">${esc(c.name)}</div>
               <div class="t2">${c.issuer ? esc(c.issuer) + " · " : ""}${t.count} purchase${t.count === 1 ? "" : "s"}</div>
             </div>
-            <div class="reorder-btns">
-              <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
-              <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="1" ${i === orderedCards.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>
-            </div>
+            <div class="drag-handle">${DRAG_HANDLE_SVG}</div>
           </div>`;
         }
         return `<div class="row card-mini" data-action="open-card" data-id="${c.id}">
@@ -954,8 +1041,10 @@
           ${reorderHome ? "" : `<span class="link" data-action="goto-cards">See all ›</span>`}
         </span>
       </div>
-      ${cardsHtml}
+      ${reorderHome ? `<div class="hint" style="margin:-2px 4px 10px;">Press and drag a handle to move a card.</div>` : ""}
+      <div class="reorder-list" id="homeCardsList">${cardsHtml}</div>
     `;
+    if (reorderHome) wireDragReorder(document.getElementById("homeCardsList"), reorderCardTo);
   }
 
   // ================= STATISTICS =================
@@ -1406,14 +1495,12 @@
       <div class="section-title">Your Cards
         ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-cards">${reorderCards ? "Done" : "Reorder"}</span>` : ""}
       </div>
-      <div class="card-stack ${reorderCards ? "reorder" : ""}">${state.cards.map((c, i) => {
+      ${reorderCards ? `<div class="hint" style="margin:-2px 4px 10px;">Press and drag a handle to move a card.</div>` : ""}
+      <div class="card-stack ${reorderCards ? "reorder" : ""}" id="cardsStack">${state.cards.map((c) => {
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
-      return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" ${reorderCards ? "" : `data-action="open-card" data-id="${c.id}"`}>
-        ${reorderCards ? `<div class="cc-reorder-btns">
-          <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
-          <button class="reorder-btn" data-action="move-card" data-id="${c.id}" data-dir="1" ${i === state.cards.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>
-        </div>` : ""}
+      return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" ${reorderCards ? `data-drag-id="${c.id}"` : `data-action="open-card" data-id="${c.id}"`}>
+        ${reorderCards ? `<div class="cc-drag-handle drag-handle">${DRAG_HANDLE_SVG}</div>` : ""}
         <div class="cc-holo"></div>
         <div class="cc-head">
           <div>
@@ -1441,6 +1528,7 @@
         </div>
       </div>`;
     }).join("")}</div>`;
+    if (reorderCards) wireDragReorder(document.getElementById("cardsStack"), reorderCardTo);
   }
 
   function swatchesHtml(sel) {
@@ -2452,8 +2540,6 @@
     } else if (a === "toggle-reorder-cards") {
       reorderCards = !reorderCards;
       render();
-    } else if (a === "move-card") {
-      moveCard(el.dataset.id, Number(el.dataset.dir));
     } else if (a === "stats-range") {
       statsRange = el.dataset.v;
       renderStats();
