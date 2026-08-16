@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "released": "2026-08-16",
-  "notes": "Version tracking, in-app updates that keep your data, and automatic recovery snapshots."
+  "notes": "Spend shown on each card, monthly spending broken down by category and by card, and a richer card finish."
 }

@@ -145,24 +145,35 @@ body::before {
 .cc {
   position: relative; overflow: hidden;
   aspect-ratio: 1.586;
-  border-radius: 19px;
-  padding: 17px 19px;
+  border-radius: 20px;
+  padding: 18px 20px;
   display: flex; flex-direction: column; justify-content: space-between;
-  background: linear-gradient(140deg, var(--g1), var(--g2));
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.17);
+  /* Layered: corner sheen, bottom-right falloff, then the 3-stop metallic body. */
+  background:
+    radial-gradient(125% 95% at 12% -12%, rgba(255,255,255,0.26), transparent 52%),
+    radial-gradient(105% 85% at 105% 112%, rgba(0,0,0,0.42), transparent 62%),
+    linear-gradient(135deg, var(--g1) 0%, var(--gm) 52%, var(--g2) 100%);
+  box-shadow:
+    0 22px 48px rgba(0, 0, 0, 0.55),
+    0 3px 8px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07);
   color: #fff;
-  transition: transform 0.22s var(--ease);
+  transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease);
 }
-.cc:active { transform: scale(0.978); }
+.cc:active { transform: scale(0.978); box-shadow: 0 10px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.2); }
+/* Fine engraved lines, the way a real card catches light. */
 .cc::before {
-  content: ""; position: absolute; inset: 0;
-  background: radial-gradient(120% 78% at 82% -18%, rgba(255,255,255,0.20), transparent 58%);
-  pointer-events: none;
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(112deg, rgba(255,255,255,0.030) 0 1px, transparent 1px 9px);
+  mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
+  -webkit-mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
 }
+/* Angled specular sweep. */
 .cc::after {
-  content: ""; position: absolute; left: -42%; top: -110%;
-  width: 46%; height: 320%; transform: rotate(23deg);
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+  content: ""; position: absolute; left: -46%; top: -110%;
+  width: 42%; height: 320%; transform: rotate(21deg);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.13) 45%, rgba(255,255,255,0.05) 60%, transparent);
   pointer-events: none;
 }
 .cc-head { display: flex; align-items: flex-start; justify-content: space-between; position: relative; }
@@ -179,11 +190,15 @@ body::before {
   border-left: 1px solid rgba(0,0,0,0.22); border-right: 1px solid rgba(0,0,0,0.22);
   border-top: 1px solid rgba(0,0,0,0.14); border-bottom: 1px solid rgba(0,0,0,0.14);
 }
-.cc-foot { display: flex; align-items: flex-end; justify-content: space-between; position: relative; }
+.cc-foot { display: flex; flex-direction: column; gap: 9px; position: relative; }
+.cc-stats { display: flex; gap: 22px; }
+.cc-stat { min-width: 0; }
 .cc-k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.13em; opacity: 0.66; font-weight: 660; }
-.cc-v { font-size: 22px; font-weight: 720; letter-spacing: -0.03em; margin-top: 2px; }
-.cc-sub { font-size: 11px; font-weight: 600; opacity: 0.62; margin-top: 3px; }
-.cc-last4 { font-size: 13px; font-weight: 620; letter-spacing: 0.09em; opacity: 0.82; }
+.cc-v { font-size: 19px; font-weight: 720; letter-spacing: -0.03em; margin-top: 3px; white-space: nowrap; }
+.cc-v.accent { color: #b6f5db; }
+.cc-tail { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.cc-sub { font-size: 10.5px; font-weight: 600; opacity: 0.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cc-last4 { font-size: 12.5px; font-weight: 620; letter-spacing: 0.09em; opacity: 0.82; flex-shrink: 0; }
 .cc-badge {
   position: absolute; top: 0; right: 0;
   font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
@@ -226,6 +241,43 @@ body::before {
 .bar > i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--mint), #7ee8c4); transition: width 0.5s var(--ease); }
 .bar.warn > i { background: linear-gradient(90deg, var(--amber), #ffd08a); }
 .bar.full > i { background: linear-gradient(90deg, var(--rose), #ff9caa); }
+
+/* ---------- breakdown bars (spend by category / by card) ---------- */
+.brk {
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-md); padding: 13px 15px; margin-bottom: 9px;
+}
+.brk-head { display: flex; align-items: center; gap: 10px; }
+.brk-ic { font-size: 16px; flex-shrink: 0; }
+.brk-swatch { width: 15px; height: 15px; border-radius: 5px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14); }
+.brk-name {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 640;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.brk-val { font-size: 14.5px; font-weight: 700; flex-shrink: 0; }
+.brk-issuer { color: var(--text-3); font-weight: 600; }
+/* 4px rounded data-end, anchored to the baseline at left. */
+.brk-bar {
+  height: 8px; border-radius: 4px; background: rgba(255,255,255,0.065);
+  overflow: hidden; margin: 9px 0 7px;
+}
+.brk-bar > i {
+  display: block; height: 100%; border-radius: 4px; min-width: 4px;
+  background: linear-gradient(90deg, var(--gold), #e8cf9e);
+  transition: width 0.5s var(--ease);
+}
+.brk-foot {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  font-size: 11.5px; color: var(--text-3);
+}
+.brk-cb { color: var(--mint); font-weight: 650; flex-shrink: 0; }
+
+/* 100%-share strip; the 2px gaps are surface showing through between segments. */
+.share-bar {
+  display: flex; gap: 2px; height: 11px; border-radius: 6px;
+  overflow: hidden; margin: 0 2px 12px;
+}
+.share-bar > i { display: block; height: 100%; min-width: 3px; }
 
 /* ---------- alerts (billing cycle) ---------- */
 .alert {

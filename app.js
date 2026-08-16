@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.0.0";
+  const APP_VERSION = "1.1.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -342,7 +342,29 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const getCard = (id) => state.cards.find((c) => c.id === id);
   const grad = (key) => GRADIENTS[key] || GRADIENTS.obsidian;
-  const gradStyle = (key) => { const g = grad(key); return `--g1:${g[0]};--g2:${g[1]}`; };
+
+  const hex2rgb = (h) => {
+    h = String(h).replace("#", "");
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  };
+  const rgb2hex = (r, g, b) => {
+    const c = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+    return "#" + c(r) + c(g) + c(b);
+  };
+  /* A slightly lifted midpoint turns a flat two-stop fill into a metallic band,
+     which is most of what separates a "coloured rectangle" from a card face. */
+  function midStop(a, b) {
+    const A = hex2rgb(a), B = hex2rgb(b);
+    return rgb2hex(...[0, 1, 2].map((i) => (A[i] * 0.62 + B[i] * 0.38) * 1.13));
+  }
+  const gradStyle = (key) => {
+    const g = grad(key);
+    return `--g1:${g[0]};--gm:${midStop(g[0], g[1])};--g2:${g[1]}`;
+  };
+  const gradCss = (key) => {
+    const g = grad(key);
+    return `linear-gradient(135deg, ${g[0]}, ${midStop(g[0], g[1])} 52%, ${g[1]})`;
+  };
 
   function toast(msg) {
     const el = document.getElementById("toast");
@@ -710,22 +732,7 @@
         </div>`).join("")
       : "";
 
-    // Top MCC groups this month
-    const byGroup = {};
-    for (const t of mTx) {
-      const g = mccInfo(t.mcc).groupId;
-      (byGroup[g] || (byGroup[g] = { cb: 0, sp: 0 })).cb += t._cb;
-      byGroup[g].sp += t.amount;
-    }
-    const top = Object.entries(byGroup).sort((a, b) => b[1].cb - a[1].cb).slice(0, 4);
-    const topHtml = top.length
-      ? `<div class="section-title">Top Categories · This Month</div>` + top.map(([g, v]) => `
-        <div class="row">
-          <div class="glyph">${groupIcon(g)}</div>
-          <div class="body"><div class="t1">${esc(groupName(g))}</div><div class="t2">${money(v.sp)} spent</div></div>
-          <div class="tail"><div class="a2 num" style="font-size:15px;">${money(v.cb)}</div></div>
-        </div>`).join("")
-      : "";
+    const topHtml = spendingStats(mTx, mSp);
 
     const cardsHtml = [...state.cards]
       .sort((a, b) => cardTotals(b.id).cashback - cardTotals(a.id).cashback)
@@ -764,6 +771,79 @@
       <div class="card-stack">${cardsHtml}</div>
       ${topHtml}
     `;
+  }
+
+  /* Month-to-date spending broken down two ways: by merchant category and by card.
+     Both are ranked-magnitude comparisons, so both are plain horizontal bars with
+     every value directly labelled — no legend needed, and nothing depends on colour
+     alone. Categories share one hue (the ranking is the message); cards keep their
+     own colour, because colour should follow the entity, not its rank. */
+  function spendingStats(mTx, totalSpend) {
+    if (!mTx.length) {
+      return `<div class="section-title">Spending · This Month</div>
+        <div class="empty" style="padding:32px 20px;">Nothing logged this month yet.</div>`;
+    }
+    const pct = (n) => (totalSpend > 0 ? (n / totalSpend) * 100 : 0);
+
+    // --- by merchant category ---
+    const byGroup = {};
+    for (const t of mTx) {
+      const g = mccInfo(t.mcc).groupId;
+      const e = byGroup[g] || (byGroup[g] = { sp: 0, cb: 0, n: 0 });
+      e.sp += t.amount; e.cb += t._cb; e.n++;
+    }
+    const cats = Object.entries(byGroup).sort((a, b) => b[1].sp - a[1].sp);
+    const maxCat = cats[0][1].sp || 1;
+
+    const catRows = cats.map(([g, v]) => `
+      <div class="brk">
+        <div class="brk-head">
+          <span class="brk-ic">${groupIcon(g)}</span>
+          <span class="brk-name">${esc(groupName(g))}</span>
+          <span class="brk-val num">${money(v.sp)}</span>
+        </div>
+        <div class="brk-bar"><i style="width:${(v.sp / maxCat) * 100}%"></i></div>
+        <div class="brk-foot">
+          <span>${pct(v.sp).toFixed(1).replace(".", ",")}% of spend · ${v.n} purchase${v.n === 1 ? "" : "s"}</span>
+          <span class="brk-cb num">${money(v.cb)} back</span>
+        </div>
+      </div>`).join("");
+
+    // --- by card ---
+    const byCard = state.cards.map((c) => {
+      const tx = mTx.filter((t) => t.cardId === c.id);
+      return { card: c, sp: tx.reduce((s, t) => s + t.amount, 0), cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.length };
+    }).filter((x) => x.sp > 0).sort((a, b) => b.sp - a.sp);
+
+    let cardHtml = "";
+    if (byCard.length) {
+      const maxCard = byCard[0].sp || 1;
+      // 2px gaps let the surface show between segments so adjacent shares stay distinct.
+      const share = byCard.length > 1
+        ? `<div class="share-bar">${byCard.map((x) =>
+            `<i style="flex:${x.sp};background:${gradCss(x.card.gradient)}"></i>`).join("")}</div>`
+        : "";
+      cardHtml = `<div class="section-title">Share by Card · This Month</div>
+        ${share}
+        ${byCard.map((x) => `
+          <div class="brk">
+            <div class="brk-head">
+              <span class="brk-swatch" style="background:${gradCss(x.card.gradient)}"></span>
+              <span class="brk-name">${x.card.issuer ? `<span class="brk-issuer">${esc(x.card.issuer)}</span> ` : ""}${esc(x.card.name)}</span>
+              <span class="brk-val num">${money(x.sp)}</span>
+            </div>
+            <div class="brk-bar"><i style="width:${(x.sp / maxCard) * 100}%;background:${gradCss(x.card.gradient)}"></i></div>
+            <div class="brk-foot">
+              <span>${pct(x.sp).toFixed(1).replace(".", ",")}% of spend · ${x.n} purchase${x.n === 1 ? "" : "s"}</span>
+              <span class="brk-cb num">${money(x.cb)} back</span>
+            </div>
+          </div>`).join("")}`;
+    }
+
+    return `<div class="section-title">Spending by Category · This Month
+        <span class="link num">${money(totalSpend)}</span></div>
+      ${catRows}
+      ${cardHtml}`;
   }
 
   // ================= LOG =================
@@ -1039,12 +1119,20 @@
         </div>
         <div class="cc-badge">up to ${best}%</div>
         <div class="cc-foot">
-          <div>
-            <div class="cc-k">This month</div>
-            <div class="cc-v num">${money(t.monthCashback)}</div>
-            <div class="cc-sub num">Lifetime ${money(t.cashback)}</div>
+          <div class="cc-stats">
+            <div class="cc-stat">
+              <div class="cc-k">Spent this month</div>
+              <div class="cc-v num">${money(t.monthSpent)}</div>
+            </div>
+            <div class="cc-stat">
+              <div class="cc-k">Cash back</div>
+              <div class="cc-v num accent">${money(t.monthCashback)}</div>
+            </div>
           </div>
-          <div class="cc-last4 num">${c.last4 ? "•••• " + esc(c.last4) : ""}</div>
+          <div class="cc-tail">
+            <div class="cc-sub num">Lifetime ${money(t.cashback)} back · ${money(t.spent)} spent</div>
+            <div class="cc-last4 num">${c.last4 ? "•••• " + esc(c.last4) : ""}</div>
+          </div>
         </div>
       </div>`;
     }).join("")}</div>`;
