@@ -1,5 +1,5 @@
 {
-  "version": "1.9.0",
+  "version": "1.10.0",
   "released": "2026-08-16",
-  "notes": "New Track tab: cash back the bank still owes you with a configurable payout delay, cancelled-order refunds you tick off when the money returns, active subscriptions and which card pays them, and card annual fees."
+  "notes": "Cash back caps now reset on each card's statement close day instead of the calendar month. Cards tab shows this statement and last statement alongside the monthly totals."
 }

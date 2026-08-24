@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.9.0";
+  const APP_VERSION = "1.10.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -452,6 +452,50 @@
   }
   const PERIOD_LABEL = { monthly: "mo", quarterly: "qtr", yearly: "yr" };
 
+  const daysInMonth = (y, m1) => new Date(y, m1, 0).getDate();   // m1 is 1-based
+
+  /* Which statement cycle a date belongs to, named by the month it CLOSES in.
+     With a close day of 20: 21 Jul–20 Aug is cycle "2026-08". Spending after the
+     20th rolls into the next cycle, which is what resets the caps. */
+  function cycleAnchor(card, dateStr) {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const closeDay = Math.min(card.statementDay, daysInMonth(y, m));
+    if (d <= closeDay) return { y, m };
+    return m === 12 ? { y: y + 1, m: 1 } : { y, m: m + 1 };
+  }
+
+  /* Cap accounting key. Caps reset on the statement close day when the card has
+     one; otherwise they fall back to plain calendar periods. */
+  function capPeriodKey(card, dateStr, period) {
+    if (!card || !card.statementDay) return periodKey(dateStr, period);
+    const a = cycleAnchor(card, dateStr);
+    if (period === "yearly") return String(a.y);
+    if (period === "quarterly") return `${a.y}-Q${Math.floor((a.m - 1) / 3) + 1}`;
+    return `${a.y}-${String(a.m).padStart(2, "0")}`;
+  }
+
+  /* Start/end dates of the monthly cycle that closes in the given YYYY-MM. */
+  function cycleRange(card, cycleKey) {
+    const [y, m] = cycleKey.split("-").map(Number);
+    const closeDay = Math.min(card.statementDay, daysInMonth(y, m));
+    const end = new Date(y, m - 1, closeDay);
+    const start = new Date(end.getTime());
+    start.setDate(start.getDate() + 1);
+    start.setMonth(start.getMonth() - 1);
+    return { start, end };
+  }
+  function cycleLabel(card, cycleKey) {
+    const { start, end } = cycleRange(card, cycleKey);
+    const f = (d) => d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+    return `${f(start)} – ${f(end)}`;
+  }
+  /* Shift a cycle key by n months. */
+  function shiftCycleKey(cycleKey, n) {
+    const [y, m] = cycleKey.split("-").map(Number);
+    const d = new Date(y, m - 1 + n, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
   function monthLabel(mk) {
     const [y, m] = mk.split("-").map(Number);
     return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
@@ -561,13 +605,13 @@
       const card = getCard(t.cardId);
       if (!card) continue;
       if (card.cardCap && card.cardCap.minSpend > 0) {
-        const k = `${card.id}|${periodKey(t.date, card.cardCap.period || "monthly")}`;
+        const k = `${card.id}|${capPeriodKey(card, t.date, card.cardCap.period || "monthly")}`;
         spendAcc[k] = (spendAcc[k] || 0) + t.amount;
       }
       const { rule } = matchRule(card, t.mcc);
       if (rule && rule.minSpend > 0) {
         const period = (rule.cap && rule.cap.period) || "monthly";
-        const k = `${card.id}|${rule.id}|${periodKey(t.date, period)}`;
+        const k = `${card.id}|${rule.id}|${capPeriodKey(card, t.date, period)}`;
         ruleSpendAcc[k] = (ruleSpendAcc[k] || 0) + t.amount;
       }
     }
@@ -594,7 +638,7 @@
       let ruleGated = false, ruleShortfall = 0;
       if (rule && rule.minSpend > 0) {
         const period = (rule.cap && rule.cap.period) || "monthly";
-        const k = `${card.id}|${rule.id}|${periodKey(t.date, period)}`;
+        const k = `${card.id}|${rule.id}|${capPeriodKey(card, t.date, period)}`;
         if ((ruleSpendAcc[k] || 0) < rule.minSpend) {
           ruleGated = true;
           ruleShortfall = rule.minSpend - (ruleSpendAcc[k] || 0);
@@ -613,7 +657,7 @@
         cb = (t.amount * rate) / 100;
         bonusPart = cb;
       } else {
-        const k = `${card.id}|${rule.id}|${periodKey(t.date, rule.cap.period)}`;
+        const k = `${card.id}|${rule.id}|${capPeriodKey(card, t.date, rule.cap.period)}`;
         const a = acc[k] || (acc[k] = { cashback: 0, spend: 0 });
         acc4rule = a;
         // How much of this purchase still qualifies for the bonus rate?
@@ -647,7 +691,7 @@
 
       // Card-wide cap and minimum-spend gate.
       if (card.cardCap && (card.cardCap.amount > 0 || card.cardCap.minSpend > 0)) {
-        const pk = periodKey(t.date, card.cardCap.period || "monthly");
+        const pk = capPeriodKey(card, t.date, card.cardCap.period || "monthly");
         const k = `${card.id}|${pk}`;
         if (card.cardCap.minSpend > 0 && (spendAcc[k] || 0) < card.cardCap.minSpend) {
           // Cycle hasn't qualified yet — show what it would pay, but count zero.
@@ -677,18 +721,18 @@
 
   function cardCapUsage(card, dateStr) {
     if (!card.cardCap) return null;
-    const pk = periodKey(dateStr || todayStr(), card.cardCap.period || "monthly");
+    const pk = capPeriodKey(card, dateStr || todayStr(), card.cardCap.period || "monthly");
     const k = `${card.id}|${pk}`;
     return {
       used: cardCapCache[k] || 0,
       spend: cardSpendCache[k] || state.transactions
-        .filter((t) => t.cardId === card.id && periodKey(t.date, card.cardCap.period || "monthly") === pk)
+        .filter((t) => t.cardId === card.id && capPeriodKey(card, t.date, card.cardCap.period || "monthly") === pk)
         .reduce((s, t) => s + t.amount, 0)
     };
   }
 
   function capUsage(card, rule, dateStr) {
-    const k = `${card.id}|${rule.id}|${periodKey(dateStr || todayStr(), rule.cap.period)}`;
+    const k = `${card.id}|${rule.id}|${capPeriodKey(card, dateStr || todayStr(), rule.cap.period)}`;
     return capUsageCache[k] || { cashback: 0, spend: 0 };
   }
 
@@ -697,12 +741,12 @@
   function ruleSpendUsage(card, rule, dateStr) {
     if (!rule || !(rule.minSpend > 0)) return 0;
     const period = (rule.cap && rule.cap.period) || "monthly";
-    const pk = periodKey(dateStr || todayStr(), period);
+    const pk = capPeriodKey(card, dateStr || todayStr(), period);
     const k = `${card.id}|${rule.id}|${pk}`;
     return ruleSpendCache[k] != null
       ? ruleSpendCache[k]
       : state.transactions
-          .filter((t) => !isCash(t) && t.cardId === card.id && matchRule(card, t.mcc).rule === rule && periodKey(t.date, period) === pk)
+          .filter((t) => !isCash(t) && t.cardId === card.id && matchRule(card, t.mcc).rule === rule && capPeriodKey(card, t.date, period) === pk)
           .reduce((s, t) => s + t.amount, 0);
   }
 
@@ -768,16 +812,36 @@
   }
 
   function cardTotals(cardId) {
+    const card = getCard(cardId);
     const txns = state.transactions.filter((t) => t.cardId === cardId);
     const mk = todayStr().slice(0, 7);
     const m = txns.filter((t) => t.date.slice(0, 7) === mk);
-    return {
+    const out = {
       cashback: txns.reduce((s, t) => s + t._cb, 0),
       spent: txns.reduce((s, t) => s + t.amount, 0),
       monthCashback: m.reduce((s, t) => s + t._cb, 0),
       monthSpent: m.reduce((s, t) => s + t.amount, 0),
-      count: txns.length
+      count: txns.length,
+      hasCycle: false
     };
+    // Statement cycles run alongside the calendar month, not instead of it —
+    // caps reset on the cycle, but the month figures stay meaningful.
+    if (card && card.statementDay) {
+      const curKey = capPeriodKey(card, todayStr(), "monthly");
+      const prevKey = shiftCycleKey(curKey, -1);
+      const inCycle = (k) => txns.filter((t) => capPeriodKey(card, t.date, "monthly") === k);
+      const cur = inCycle(curKey), prev = inCycle(prevKey);
+      out.hasCycle = true;
+      out.cycleKey = curKey;
+      out.cycleLabel = cycleLabel(card, curKey);
+      out.cycleCashback = cur.reduce((s, t) => s + t._cb, 0);
+      out.cycleSpent = cur.reduce((s, t) => s + t.amount, 0);
+      out.prevCycleKey = prevKey;
+      out.prevCycleLabel = cycleLabel(card, prevKey);
+      out.prevCycleCashback = prev.reduce((s, t) => s + t._cb, 0);
+      out.prevCycleSpent = prev.reduce((s, t) => s + t.amount, 0);
+    }
+    return out;
   }
 
   // ---------------- sheet ----------------
@@ -1132,7 +1196,10 @@
     const byKey = {};
     for (const t of state.transactions) {
       if (isCash(t) || !t.cardId || !(t._cb > 0)) continue;
-      const k = t.cardId + "|" + t.date.slice(0, 7);
+      const c = getCard(t.cardId);
+      if (!c) continue;
+      // Group by the statement cycle that will actually pay it out.
+      const k = t.cardId + "|" + capPeriodKey(c, t.date, "monthly");
       byKey[k] = (byKey[k] || 0) + t._cb;
     }
     const today = todayStr();
@@ -1250,7 +1317,8 @@
         (p.received ? "✓" : "") +
       '</button>' +
       '<div class="trk-body">' +
-        '<div class="trk-t1">' + esc(p.card.name) + ' · ' + monthLabel(p.monthKey) + '</div>' +
+        '<div class="trk-t1">' + esc(p.card.name) + ' · ' +
+          (p.card.statementDay ? cycleLabel(p.card, p.monthKey) : monthLabel(p.monthKey)) + '</div>' +
         '<div class="trk-t2">' + when + '</div>' +
       '</div>' +
       '<div class="trk-amt num">' + money(p.receivedAmount != null ? p.receivedAmount : p.amount) + '</div>' +
@@ -1924,7 +1992,20 @@
             <div class="cc-sub num">Lifetime ${money(t.cashback)} back · ${money(t.spent)} spent</div>
           </div>
         </div>
-      </div>`;
+      </div>
+      ${reorderCards ? "" : t.hasCycle ? `<div class="cyc">
+        <div class="cyc-col">
+          <div class="cyc-k">This statement <span class="cyc-dates">${esc(t.cycleLabel)}</span></div>
+          <div class="cyc-v num">${money(t.cycleCashback)}</div>
+          <div class="cyc-s num">${money(t.cycleSpent)} spent</div>
+        </div>
+        <div class="cyc-sep"></div>
+        <div class="cyc-col">
+          <div class="cyc-k">Last statement <span class="cyc-dates">${esc(t.prevCycleLabel)}</span></div>
+          <div class="cyc-v num muted">${money(t.prevCycleCashback)}</div>
+          <div class="cyc-s num">${money(t.prevCycleSpent)} spent</div>
+        </div>
+      </div>` : `<div class="cyc cyc-none">Set a statement close day to track cash back by statement cycle.</div>`}`;
     }).join("")}</div>`;
     if (reorderCards) wireDragReorder(document.getElementById("cardsStack"), reorderCardTo);
   }
@@ -2147,7 +2228,9 @@
             const cur = r.cap.type === "spend" ? used.spend : used.cashback;
             const pct = Math.min(100, (cur / r.cap.amount) * 100);
             const cls = pct >= 100 ? "full" : pct >= 75 ? "warn" : "";
-            meta = `${r.cap.type === "spend" ? "Spend" : "Cash back"} cap ${money(r.cap.amount)} / ${PERIOD_LABEL[r.cap.period]} · ${money(cur)} used`;
+            const unitTxt = (card.statementDay && r.cap.period === "monthly")
+              ? "statement" : PERIOD_LABEL[r.cap.period];
+            meta = `${r.cap.type === "spend" ? "Spend" : "Cash back"} cap ${money(r.cap.amount)} / ${unitTxt} · ${money(cur)} used`;
             barHtml = `<div class="bar ${cls}"><i style="width:${pct}%"></i></div>`;
           } else {
             meta = "No cap";
