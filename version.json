@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
+  "version": "1.9.0",
   "released": "2026-08-16",
-  "notes": "Upcoming on Overview now only flags payments due within 5 days. Mark a card Paid from its detail sheet — it clears the reminder and shows a Paid badge on the Cards tab until the next due date rolls around. Activity gets Prev/Next month navigation instead of one long scroll."
+  "notes": "New Track tab: cash back the bank still owes you with a configurable payout delay, cancelled-order refunds you tick off when the money returns, active subscriptions and which card pays them, and card annual fees."
 }

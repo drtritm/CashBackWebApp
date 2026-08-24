@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.7.0";
+  const APP_VERSION = "1.9.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -103,7 +103,17 @@
   function blank() {
     return {
       cards: [], transactions: [],
-      settings: { recentMccs: [], notify: false, notifyDays: 3, autoBackup: true, lastSnapshotDate: null, lastSavedDate: null }
+      /* payouts: cash back the bank still owes you. Keyed "cardId|YYYY-MM" and
+         only written once you tick it as received — the pending list itself is
+         derived from transactions, so it can never drift out of sync. */
+      payouts: {},
+      subscriptions: [],
+      refunds: [],
+      settings: {
+        recentMccs: [], notify: false, notifyDays: 3, autoBackup: true,
+        lastSnapshotDate: null, lastSavedDate: null,
+        defaultCashbackDelay: 45
+      }
     };
   }
 
@@ -148,6 +158,10 @@
         const s = blank();
         if (Array.isArray(d.cards)) s.cards = d.cards;
         if (Array.isArray(d.transactions)) s.transactions = d.transactions;
+        // Added in 1.9 — older saves simply won't have them.
+        if (d.payouts && typeof d.payouts === "object") s.payouts = d.payouts;
+        if (Array.isArray(d.subscriptions)) s.subscriptions = d.subscriptions;
+        if (Array.isArray(d.refunds)) s.refunds = d.refunds;
         if (d.settings) Object.assign(s.settings, d.settings);
         return s;
       }
@@ -832,7 +846,7 @@
   const tabbar = document.getElementById("tabbar");
   const TITLES = {
     home: "Overview", log: "Card Purchase", cash: "Cash Spending",
-    cards: "My Cards", history: "Activity", stats: "Statistics", more: "Settings"
+    cards: "My Cards", history: "Activity", track: "Track", stats: "Statistics", more: "Settings"
   };
   let tab = "home";
   let histFilter = "all";
@@ -977,7 +991,7 @@
     actionEl.hidden = tab !== "cards";
     ({
       home: renderHome, log: renderLog, cash: renderCash, cards: renderCards,
-      history: renderHistory, stats: renderStats, more: renderMore
+      history: renderHistory, track: renderTrack, stats: renderStats, more: renderMore
     }[tab])();
   }
 
@@ -1086,6 +1100,348 @@
       <div class="reorder-list" id="homeCardsList">${cardsHtml}</div>
     `;
     if (reorderHome) wireDragReorder(document.getElementById("homeCardsList"), reorderCardTo);
+  }
+
+  // ================= TRACK: payouts, subscriptions, fees, refunds =================
+  let trackView = "incoming";   // incoming | recurring
+
+  const MONTH_NAMES = ["January","February","March","April","May","June",
+                       "July","August","September","October","November","December"];
+  const SUB_CYCLES = { monthly: "Monthly", quarterly: "Quarterly", yearly: "Yearly" };
+
+  const cardDelay = (c) =>
+    (c && c.cashbackDelay != null) ? c.cashbackDelay : (state.settings.defaultCashbackDelay || 45);
+
+  function addDays(d, n) { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+  const ymd = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const lastDayOfMonth = (y, m) => new Date(y, m + 1, 0);
+
+  /* When a month's cash back should land: the statement close for that month
+     (or month end when no statement day is set) plus the bank's processing delay. */
+  function expectedPayoutDate(card, monthKey) {
+    const [y, m] = monthKey.split("-").map(Number);
+    const base = card.statementDay
+      ? new Date(y, m - 1, Math.min(card.statementDay, lastDayOfMonth(y, m - 1).getDate()))
+      : lastDayOfMonth(y, m - 1);
+    return addDays(base, cardDelay(card));
+  }
+
+  /* Pending payouts are DERIVED from transactions, so they always match reality.
+     Only the "received" tick is stored. */
+  function buildPayouts() {
+    const byKey = {};
+    for (const t of state.transactions) {
+      if (isCash(t) || !t.cardId || !(t._cb > 0)) continue;
+      const k = t.cardId + "|" + t.date.slice(0, 7);
+      byKey[k] = (byKey[k] || 0) + t._cb;
+    }
+    const today = todayStr();
+    const rows = [];
+    for (const k in byKey) {
+      const [cardId, monthKey] = k.split("|");
+      const card = getCard(cardId);
+      if (!card) continue;
+      const rec = state.payouts[k] || null;
+      const due = expectedPayoutDate(card, monthKey);
+      rows.push({
+        key: k, card, monthKey, amount: byKey[k],
+        expected: due, expectedStr: ymd(due),
+        received: !!rec,
+        receivedDate: rec ? rec.date : null,
+        receivedAmount: rec && rec.amount != null ? rec.amount : null,
+        overdue: !rec && ymd(due) < today
+      });
+    }
+    rows.sort((a, b) => (a.expectedStr < b.expectedStr ? 1 : -1));
+    return rows;
+  }
+
+  /* Next date a subscription will be charged, rolled forward from its start. */
+  function nextChargeDate(sub) {
+    if (!sub.startDate) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    let d = parseDate(sub.startDate);
+    const step = sub.cycle === "yearly" ? 12 : sub.cycle === "quarterly" ? 3 : 1;
+    let guard = 0;
+    while (d < today && guard++ < 600) {
+      const day = d.getDate();
+      d.setMonth(d.getMonth() + step);
+      // Clamp so the 31st doesn't skip a short month.
+      if (d.getDate() < day) d.setDate(0);
+    }
+    return d;
+  }
+
+  const subMonthlyCost = (sub) =>
+    sub.cycle === "yearly" ? sub.amount / 12 : sub.cycle === "quarterly" ? sub.amount / 3 : sub.amount;
+
+  /* Next time the annual fee is charged, based on the configured month. */
+  function nextAnnualFee(card) {
+    if (!card.annualFee || !card.annualFeeMonth) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const y = today.getFullYear();
+    let d = new Date(y, card.annualFeeMonth - 1, 1);
+    if (d < today) d = new Date(y + 1, card.annualFeeMonth - 1, 1);
+    return d;
+  }
+
+  function renderTrack() {
+    const seg =
+      '<div class="seg">' +
+        '<button class="seg-btn ' + (trackView === "incoming" ? "on" : "") + '" data-action="track-view" data-v="incoming">Money coming in</button>' +
+        '<button class="seg-btn ' + (trackView === "recurring" ? "on" : "") + '" data-action="track-view" data-v="recurring">Recurring costs</button>' +
+      '</div>';
+    view.innerHTML = seg + (trackView === "incoming" ? trackIncoming() : trackRecurring());
+  }
+
+  // ---- incoming: cash back payouts + cancelled-order refunds ----
+  function trackIncoming() {
+    const payouts = buildPayouts();
+    const pending = payouts.filter((p) => !p.received);
+    const done = payouts.filter((p) => p.received);
+    const owed = pending.reduce((s, p) => s + p.amount, 0);
+
+    const openRefunds = state.refunds.filter((r) => !r.receivedDate);
+    const doneRefunds = state.refunds.filter((r) => r.receivedDate);
+    const refundOwed = openRefunds.reduce((s, r) => s + r.amount, 0);
+
+    let html =
+      '<div class="stat-2" style="margin-bottom:6px;">' +
+        '<div class="stat"><div class="k">Cash back owed</div><div class="v mint num">' + money(owed) + '</div></div>' +
+        '<div class="stat"><div class="k">Refunds owed</div><div class="v num">' + money(refundOwed) + '</div></div>' +
+      '</div>';
+
+    html += '<div class="section-title">Cash Back Payouts</div>';
+    if (!pending.length && !done.length) {
+      html += '<div class="empty" style="padding:26px 14px;">No cash back earned yet.<br>Log a card purchase and it will appear here.</div>';
+    } else {
+      if (!pending.length) html += '<div class="empty" style="padding:20px 14px;">Everything has been received.</div>';
+      html += pending.map(payoutRow).join("");
+      if (done.length) {
+        html += '<div class="sub-head">Received (' + done.length + ')</div>' +
+          done.slice(0, 6).map(payoutRow).join("");
+      }
+    }
+
+    html += '<div class="section-title">Cancelled Order Refunds' +
+      '<span class="link" data-action="add-refund">+ Add</span></div>';
+    if (!openRefunds.length && !doneRefunds.length) {
+      html += '<div class="empty" style="padding:26px 14px;">Nothing waiting.<br>Add a cancelled order and tick it once the money is back.</div>';
+    } else {
+      html += openRefunds.map(refundRow).join("");
+      if (doneRefunds.length) {
+        html += '<div class="sub-head">Refunded (' + doneRefunds.length + ')</div>' +
+          doneRefunds.slice(0, 6).map(refundRow).join("");
+      }
+    }
+    return html;
+  }
+
+  function payoutRow(p) {
+    const cls = p.received ? "done" : p.overdue ? "late" : "";
+    const days = p.received ? null : daysUntil(p.expected);
+    const when = p.received
+      ? "Received " + dateLabel(p.receivedDate)
+      : days === 0 ? "Expected today"
+      : days > 0 ? "Expected " + dateLabel(p.expectedStr) + " · in " + days + " day" + (days === 1 ? "" : "s")
+      : "Expected " + dateLabel(p.expectedStr) + " · " + Math.abs(days) + " day" + (Math.abs(days) === 1 ? "" : "s") + " late";
+    return '<div class="trk ' + cls + '">' +
+      '<button class="trk-tick ' + (p.received ? "on" : "") + '" data-action="toggle-payout" data-key="' + esc(p.key) + '" aria-label="Mark received">' +
+        (p.received ? "✓" : "") +
+      '</button>' +
+      '<div class="trk-body">' +
+        '<div class="trk-t1">' + esc(p.card.name) + ' · ' + monthLabel(p.monthKey) + '</div>' +
+        '<div class="trk-t2">' + when + '</div>' +
+      '</div>' +
+      '<div class="trk-amt num">' + money(p.receivedAmount != null ? p.receivedAmount : p.amount) + '</div>' +
+    '</div>';
+  }
+
+  function refundRow(r) {
+    const card = r.cardId ? getCard(r.cardId) : null;
+    const doneCls = r.receivedDate ? "done" : "";
+    const meta = r.receivedDate
+      ? "Refunded " + dateLabel(r.receivedDate)
+      : "Cancelled " + dateLabel(r.date) + (card ? " · " + esc(card.name) : "") + " · waiting";
+    return '<div class="trk ' + doneCls + '" data-action="edit-refund" data-id="' + r.id + '">' +
+      '<button class="trk-tick ' + (r.receivedDate ? "on" : "") + '" data-action="toggle-refund" data-id="' + r.id + '" aria-label="Mark refunded">' +
+        (r.receivedDate ? "✓" : "") +
+      '</button>' +
+      '<div class="trk-body">' +
+        '<div class="trk-t1">' + esc(r.merchant || "Cancelled order") + '</div>' +
+        '<div class="trk-t2">' + meta + '</div>' +
+      '</div>' +
+      '<div class="trk-amt num">' + money(r.amount) + '</div>' +
+    '</div>';
+  }
+
+  // ---- recurring: subscriptions + annual fees ----
+  function trackRecurring() {
+    const subs = state.subscriptions.filter((s) => s.active !== false);
+    const paused = state.subscriptions.filter((s) => s.active === false);
+    const perMonth = subs.reduce((s, x) => s + subMonthlyCost(x), 0);
+
+    const feeCards = state.cards.filter((c) => c.annualFee > 0);
+    const feeTotal = feeCards.reduce((s, c) => s + c.annualFee, 0);
+
+    let html =
+      '<div class="stat-2" style="margin-bottom:6px;">' +
+        '<div class="stat"><div class="k">Subscriptions / month</div><div class="v num">' + money(perMonth) + '</div></div>' +
+        '<div class="stat"><div class="k">Annual fees / year</div><div class="v num">' + money(feeTotal) + '</div></div>' +
+      '</div>' +
+      '<div class="hint" style="margin:2px 4px 10px;">Subscriptions cost ' + money(perMonth * 12) + ' a year, plus ' + money(feeTotal) + ' in card fees.</div>';
+
+    html += '<div class="section-title">Subscriptions<span class="link" data-action="add-sub">+ Add</span></div>';
+    if (!subs.length && !paused.length) {
+      html += '<div class="empty" style="padding:26px 14px;">No subscriptions tracked.<br>Add Netflix, Spotify, iCloud and the rest to see what they really cost.</div>';
+    } else {
+      html += subs.map(subRow).join("");
+      if (paused.length) {
+        html += '<div class="sub-head">Paused (' + paused.length + ')</div>' + paused.map(subRow).join("");
+      }
+    }
+
+    html += '<div class="section-title">Card Annual Fees</div>';
+    if (!feeCards.length) {
+      html += '<div class="empty" style="padding:26px 14px;">No annual fees set.<br>Open a card in <b>Cards</b> and fill in its yearly fee.</div>';
+    } else {
+      html += feeCards.map((c) => {
+        const next = nextAnnualFee(c);
+        const when = next
+          ? dateLabel(ymd(next)) + " · in " + daysUntil(next) + " days"
+          : "Month not set";
+        return '<div class="trk" data-action="open-card" data-id="' + c.id + '">' +
+          '<div class="trk-swatch" style="background:' + gradCss(c.gradient) + '"></div>' +
+          '<div class="trk-body">' +
+            '<div class="trk-t1">' + esc(c.name) + '</div>' +
+            '<div class="trk-t2">' + when + '</div>' +
+          '</div>' +
+          '<div class="trk-amt num">' + money(c.annualFee) + '</div>' +
+        '</div>';
+      }).join("");
+    }
+    return html;
+  }
+
+  function subRow(sub) {
+    const card = sub.cardId ? getCard(sub.cardId) : null;
+    const next = nextChargeDate(sub);
+    const paused = sub.active === false;
+    const when = paused ? "Paused"
+      : next ? "Next " + dateLabel(ymd(next)) + " · in " + daysUntil(next) + " day" + (daysUntil(next) === 1 ? "" : "s")
+      : "No start date";
+    return '<div class="trk ' + (paused ? "done" : "") + '" data-action="edit-sub" data-id="' + sub.id + '">' +
+      '<div class="trk-swatch" style="background:' + (card ? gradCss(card.gradient) : "#3a4150") + '"></div>' +
+      '<div class="trk-body">' +
+        '<div class="trk-t1">' + esc(sub.name) + '<span class="tag mcc">' + esc(SUB_CYCLES[sub.cycle] || "Monthly") + '</span></div>' +
+        '<div class="trk-t2">' + (card ? esc(card.name) + " · " : "No card · ") + when + '</div>' +
+      '</div>' +
+      '<div class="trk-amt num">' + money(sub.amount) + '</div>' +
+    '</div>';
+  }
+
+  // ---- editors ----
+  function openSubSheet(id) {
+    const existing = id ? state.subscriptions.find((s) => s.id === id) : null;
+    const d = existing || { name: "", cardId: state.cards.length ? state.cards[0].id : null,
+                            amount: 0, cycle: "monthly", startDate: todayStr(), active: true };
+    openSheet(
+      '<h2>' + (existing ? "Edit Subscription" : "New Subscription") + '</h2>' +
+      '<div class="field"><label>Service</label><input id="sb_name" type="text" placeholder="Netflix" value="' + esc(d.name) + '" /></div>' +
+      '<div class="field"><label>Amount</label>' +
+        '<div class="amount-input"><input id="sb_amount" type="text" inputmode="numeric" value="' + (d.amount ? formatVnd(d.amount) : "") + '" /><span class="cur">₫</span></div>' +
+      '</div>' +
+      '<div class="row-2">' +
+        '<div class="field"><label>Billing cycle</label><select id="sb_cycle">' +
+          Object.keys(SUB_CYCLES).map((k) => '<option value="' + k + '" ' + (d.cycle === k ? "selected" : "") + '>' + SUB_CYCLES[k] + '</option>').join("") +
+        '</select></div>' +
+        '<div class="field"><label>First charged</label><input id="sb_start" type="date" value="' + (d.startDate || todayStr()) + '" /></div>' +
+      '</div>' +
+      '<div class="field"><label>Paid with</label><select id="sb_card">' +
+        '<option value="">No card / cash</option>' +
+        state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(c.name) + '</option>').join("") +
+      '</select></div>' +
+      (existing ? '<label class="toggle-row" style="margin:4px 0 14px;">' +
+        '<span><span class="tr-t1">Active</span><span class="tr-t2">Turn off to keep it listed but stop counting the cost</span></span>' +
+        '<input type="checkbox" id="sb_active" ' + (d.active !== false ? "checked" : "") + ' /></label>' : "") +
+      '<button class="btn btn-primary" id="sb_save">' + (existing ? "Save" : "Add Subscription") + '</button>' +
+      (existing ? '<button class="btn btn-danger" id="sb_del">Delete</button>' : "") +
+      '<button class="btn btn-ghost" data-action="close-sheet">Cancel</button>'
+    );
+    wireMoneyInput(document.getElementById("sb_amount"));
+    document.getElementById("sb_save").addEventListener("click", () => {
+      const name = document.getElementById("sb_name").value.trim();
+      const amount = parseVnd(document.getElementById("sb_amount").value);
+      if (!name) { toast("Give it a name"); return; }
+      if (!(amount > 0)) { toast("Enter an amount"); return; }
+      const activeEl = document.getElementById("sb_active");
+      const rec = {
+        id: existing ? existing.id : uid(),
+        name, amount,
+        cycle: document.getElementById("sb_cycle").value,
+        startDate: document.getElementById("sb_start").value || todayStr(),
+        cardId: document.getElementById("sb_card").value || null,
+        active: activeEl ? activeEl.checked : true
+      };
+      if (existing) Object.assign(existing, rec);
+      else state.subscriptions.push(rec);
+      save(); closeSheet(); toast("Saved"); render();
+    });
+    const del = document.getElementById("sb_del");
+    if (del) del.addEventListener("click", () => {
+      if (!confirm("Delete this subscription?")) return;
+      state.subscriptions = state.subscriptions.filter((x) => x.id !== existing.id);
+      save(); closeSheet(); toast("Deleted"); render();
+    });
+  }
+
+  function openRefundSheet(id) {
+    const existing = id ? state.refunds.find((r) => r.id === id) : null;
+    const d = existing || { merchant: "", cardId: state.cards.length ? state.cards[0].id : null,
+                            amount: 0, date: todayStr(), note: "", receivedDate: null };
+    openSheet(
+      '<h2>' + (existing ? "Edit Refund" : "Track a Refund") + '</h2>' +
+      '<div class="sheet-sub">For orders you cancelled. Tick it once the money is back.</div>' +
+      '<div class="field"><label>Merchant / order</label><input id="rf_merchant" type="text" placeholder="Shopee order" value="' + esc(d.merchant) + '" /></div>' +
+      '<div class="field"><label>Amount</label>' +
+        '<div class="amount-input"><input id="rf_amount" type="text" inputmode="numeric" value="' + (d.amount ? formatVnd(d.amount) : "") + '" /><span class="cur">₫</span></div>' +
+      '</div>' +
+      '<div class="row-2">' +
+        '<div class="field"><label>Cancelled on</label><input id="rf_date" type="date" value="' + (d.date || todayStr()) + '" /></div>' +
+        '<div class="field"><label>Paid with</label><select id="rf_card">' +
+          '<option value="">No card / cash</option>' +
+          state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(c.name) + '</option>').join("") +
+        '</select></div>' +
+      '</div>' +
+      '<div class="field"><label>Note</label><input id="rf_note" type="text" placeholder="Optional" value="' + esc(d.note || "") + '" /></div>' +
+      '<button class="btn btn-primary" id="rf_save">' + (existing ? "Save" : "Add") + '</button>' +
+      (existing ? '<button class="btn btn-danger" id="rf_del">Delete</button>' : "") +
+      '<button class="btn btn-ghost" data-action="close-sheet">Cancel</button>'
+    );
+    wireMoneyInput(document.getElementById("rf_amount"));
+    document.getElementById("rf_save").addEventListener("click", () => {
+      const merchant = document.getElementById("rf_merchant").value.trim();
+      const amount = parseVnd(document.getElementById("rf_amount").value);
+      if (!merchant) { toast("Name the order"); return; }
+      if (!(amount > 0)) { toast("Enter an amount"); return; }
+      const rec = {
+        id: existing ? existing.id : uid(),
+        merchant, amount,
+        date: document.getElementById("rf_date").value || todayStr(),
+        cardId: document.getElementById("rf_card").value || null,
+        note: document.getElementById("rf_note").value.trim(),
+        receivedDate: existing ? existing.receivedDate : null
+      };
+      if (existing) Object.assign(existing, rec);
+      else state.refunds.push(rec);
+      save(); closeSheet(); toast("Saved"); render();
+    });
+    const del = document.getElementById("rf_del");
+    if (del) del.addEventListener("click", () => {
+      if (!confirm("Delete this refund?")) return;
+      state.refunds = state.refunds.filter((x) => x.id !== existing.id);
+      save(); closeSheet(); toast("Deleted"); render();
+    });
   }
 
   // ================= STATISTICS =================
@@ -1604,6 +1960,24 @@
         <div class="field"><label>Payment Due (day)</label><input id="c_due" type="number" min="1" max="31" placeholder="e.g. 15" value="${c.dueDay || ""}" /></div>
       </div>
       <div class="hint">Day of the month, 1–31. Used for the reminders on your Overview screen.</div>
+      <div class="row-2">
+        <div class="field">
+          <label>Cash Back Paid After (days)</label>
+          <input id="c_cbdelay" type="number" min="0" max="180" placeholder="45" value="${c.cashbackDelay != null ? c.cashbackDelay : ""}" />
+        </div>
+        <div class="field">
+          <label>Annual Fee (₫)</label>
+          <input id="c_fee" type="text" inputmode="numeric" placeholder="0" value="${c.annualFee ? formatVnd(c.annualFee) : ""}" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Annual Fee Charged (month)</label>
+        <select id="c_feemonth">
+          <option value="">Not set</option>
+          ${MONTH_NAMES.map((m, i) => `<option value="${i + 1}" ${c.annualFeeMonth === i + 1 ? "selected" : ""}>${m}</option>`).join("")}
+        </select>
+      </div>
+      <div class="hint">How long your bank takes to credit cash back, and when the yearly fee hits. Both show up on the Track tab.</div>
       ${opts.showBase ? `
         <div class="field">
           <label>Base Rate — everything else (%)</label>
@@ -1616,6 +1990,9 @@
   }
   function readCardForm(existing) {
     const baseEl = document.getElementById("c_base");
+    const delayEl = document.getElementById("c_cbdelay");
+    const feeEl = document.getElementById("c_fee");
+    const feeMonthEl = document.getElementById("c_feemonth");
     return {
       name: document.getElementById("c_name").value.trim(),
       issuer: document.getElementById("c_issuer").value.trim(),
@@ -1623,6 +2000,10 @@
       baseRate: baseEl ? (parseFloat(baseEl.value) || 0) : ((existing && existing.baseRate) || 0),
       statementDay: parseInt(document.getElementById("c_stmt").value, 10) || null,
       dueDay: parseInt(document.getElementById("c_due").value, 10) || null,
+      // Blank means "use the global default", so keep null rather than coercing to 0.
+      cashbackDelay: delayEl && delayEl.value !== "" ? Math.max(0, parseInt(delayEl.value, 10) || 0) : null,
+      annualFee: feeEl ? parseVnd(feeEl.value) : ((existing && existing.annualFee) || 0),
+      annualFeeMonth: feeMonthEl && feeMonthEl.value ? parseInt(feeMonthEl.value, 10) : null,
       gradient: pickedGrad()
     };
   }
@@ -2375,6 +2756,15 @@
         </div>
       </div>
 
+      <div class="section-title">Cash Back Payouts</div>
+      <div class="panel">
+        <div class="field" style="margin-bottom:8px;">
+          <label>Default wait before cash back lands (days)</label>
+          <input id="cbDelayDefault" type="number" min="0" max="180" value="${state.settings.defaultCashbackDelay || 45}" />
+        </div>
+        <div class="hint" style="margin:0;">Used on the Track tab to work out when each month's cash back is due. Any card can override this in its own settings.</div>
+      </div>
+
       <div class="section-title">Version</div>
       <div class="panel">
         <div class="toggle-row" style="margin-bottom:14px;">
@@ -2409,6 +2799,12 @@
       <div class="hint" style="text-align:center;margin-top:20px;">Cashback Tracker v${APP_VERSION} · data stored locally on this device</div>
     `;
     document.getElementById("importFile").addEventListener("change", onImport);
+    const cbDelayEl = document.getElementById("cbDelayDefault");
+    if (cbDelayEl) cbDelayEl.addEventListener("change", () => {
+      state.settings.defaultCashbackDelay = Math.max(0, parseInt(cbDelayEl.value, 10) || 45);
+      save();
+      toast("Default set to " + state.settings.defaultCashbackDelay + " days");
+    });
     requestPersistentStorage().then((ok) => {
       const el = document.getElementById("persistState");
       if (!el) return;
@@ -2597,6 +2993,25 @@
       go("stats");
     } else if (a === "goto-cards") {
       go("cards");
+    } else if (a === "track-view") {
+      trackView = el.dataset.v;
+      renderTrack();
+    } else if (a === "toggle-payout") {
+      const k = el.dataset.key;
+      if (state.payouts[k]) delete state.payouts[k];
+      else state.payouts[k] = { date: todayStr() };
+      save(); renderTrack();
+    } else if (a === "add-sub") {
+      openSubSheet(null);
+    } else if (a === "edit-sub") {
+      openSubSheet(el.dataset.id);
+    } else if (a === "add-refund") {
+      openRefundSheet(null);
+    } else if (a === "edit-refund") {
+      openRefundSheet(el.dataset.id);
+    } else if (a === "toggle-refund") {
+      const r = state.refunds.find((x) => x.id === el.dataset.id);
+      if (r) { r.receivedDate = r.receivedDate ? null : todayStr(); save(); renderTrack(); }
     } else if (a === "toggle-reorder-home") {
       reorderHome = !reorderHome;
       render();

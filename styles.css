@@ -477,6 +477,42 @@ body::before {
 .card-mini .tail .a1 { font-size: 15px; font-weight: 720; }
 .card-mini .tail .a2 { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
 
+/* ---------- track tab (payouts, subs, fees, refunds) ---------- */
+.trk {
+  display: flex; align-items: center; gap: 12px;
+  padding: 13px 15px; margin-bottom: 8px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-md);
+  transition: opacity 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+.trk.late { border-color: rgba(245,181,68,0.32); background: var(--amber-soft); }
+.trk.done { opacity: 0.5; }
+.trk-tick {
+  width: 26px; height: 26px; flex-shrink: 0; padding: 0;
+  border-radius: 8px; border: 1.6px solid var(--hairline);
+  background: rgba(255,255,255,0.05); color: #04241a;
+  font-size: 15px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.trk-tick.on { background: var(--mint); border-color: var(--mint); }
+.trk-swatch {
+  width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);
+}
+.trk-body { flex: 1; min-width: 0; }
+.trk-t1 {
+  font-size: 14.5px; font-weight: 640;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trk-t2 { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+.trk.late .trk-t2 { color: var(--amber); }
+.trk-amt { font-size: 14.5px; font-weight: 700; flex-shrink: 0; }
+.sub-head {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-3); margin: 16px 4px 8px;
+}
+
 /* ---------- alerts (billing cycle) ---------- */
 .alert {
   display: flex; align-items: center; gap: 13px;
