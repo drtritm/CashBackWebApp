@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.13.0";
+  const APP_VERSION = "1.14.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -122,6 +122,11 @@
          only written once you tick it as received — the pending list itself is
          derived from transactions, so it can never drift out of sync. */
       payouts: {},
+      /* payments: which statements you've actually settled. Keyed "cardId|YYYY-MM"
+         (the cycle the statement closes in) so the record is permanent — unlike the
+         old single paidThroughDue flag, which erased itself each billing cycle and
+         left no history. */
+      payments: {},
       subscriptions: [],
       refunds: [],
       settings: {
@@ -175,6 +180,7 @@
         if (Array.isArray(d.transactions)) s.transactions = d.transactions;
         // Added in 1.9 — older saves simply won't have them.
         if (d.payouts && typeof d.payouts === "object") s.payouts = d.payouts;
+        if (d.payments && typeof d.payments === "object") s.payments = d.payments;
         if (Array.isArray(d.subscriptions)) s.subscriptions = d.subscriptions;
         if (Array.isArray(d.refunds)) s.refunds = d.refunds;
         if (d.settings) Object.assign(s.settings, d.settings);
@@ -541,25 +547,100 @@
   }
   const isoDate = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 
-  /* "Paid" is tracked against a specific upcoming due date, not just a flag —
-     so it automatically clears itself once that due date passes and the next
-     billing cycle rolls a new one in, with no reset code needed anywhere. */
-  function dueDateKey(card) {
+  /* Payment is recorded per statement cycle, so every settled statement stays on
+     record instead of the flag being wiped when the next cycle starts. */
+  const paymentKey = (card, cycleKey) => card.id + "|" + cycleKey;
+
+  /* Due date for the statement closing in cycleKey: the first dueDay that falls
+     after the close date. A due day earlier in the month lands the next month. */
+  function statementDueDate(card, cycleKey) {
     if (!card.dueDay) return null;
-    const d = nextOccurrence(card.dueDay);
-    return d ? isoDate(d) : null;
+    const end = cycleRange(card, cycleKey).end;
+    const at = (y, m) => new Date(y, m, Math.min(card.dueDay, new Date(y, m + 1, 0).getDate()));
+    let d = at(end.getFullYear(), end.getMonth());
+    if (d <= end) {
+      const ny = end.getMonth() === 11 ? end.getFullYear() + 1 : end.getFullYear();
+      const nm = end.getMonth() === 11 ? 0 : end.getMonth() + 1;
+      d = at(ny, nm);
+    }
+    return d;
   }
+
+  /* The newest closed statement that actually carried a balance — the one you'd
+     be paying now. Cycles that billed nothing are skipped so the card badge and
+     the Statements list never disagree about what's outstanding. */
+  function latestClosedCycle(card) {
+    if (!card.statementDay) return null;
+    const today = todayStr();
+    let k = capPeriodKey(card, today, "monthly");
+    if (isoDate(cycleRange(card, k).end) >= today) k = shiftCycleKey(k, -1);
+    for (let i = 0; i < 24; i++) {
+      const billed = state.transactions.some((t) =>
+        !isCash(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
+      if (billed) return k;
+      k = shiftCycleKey(k, -1);
+    }
+    return null;
+  }
+
   function isCardPaid(card) {
-    const key = dueDateKey(card);
-    return !!(key && card.paidThroughDue === key);
+    const k = latestClosedCycle(card);
+    return !!(k && state.payments[paymentKey(card, k)]);
   }
   function togglePaid(cardId) {
     const card = getCard(cardId);
     if (!card) return;
-    const key = dueDateKey(card);
-    if (!key) return;
-    card.paidThroughDue = isCardPaid(card) ? null : key;
+    const k = latestClosedCycle(card);
+    if (!k) return;
+    toggleStatementPaid(paymentKey(card, k));
+  }
+  function toggleStatementPaid(key, amount) {
+    if (state.payments[key]) delete state.payments[key];
+    else state.payments[key] = amount != null ? { date: todayStr(), amount } : { date: todayStr() };
     save();
+  }
+
+  /* Every statement worth showing: closed cycles that carried a balance, plus the
+     cycle currently open. Derived from transactions, so it can't drift. */
+  function buildStatements() {
+    const today = todayStr();
+    const rows = [];
+    for (const card of state.cards) {
+      if (!card.statementDay) continue;
+      const keys = new Set();
+      for (const t of state.transactions) {
+        if (isCash(t) || t.cardId !== card.id) continue;
+        keys.add(capPeriodKey(card, t.date, "monthly"));
+      }
+      keys.add(capPeriodKey(card, today, "monthly"));
+      for (const k of keys) {
+        const range = cycleRange(card, k);
+        const closed = isoDate(range.end) < today;
+        const tx = state.transactions.filter((t) =>
+          !isCash(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
+        const balance = tx.reduce((sum, t) => sum + t.amount, 0);
+        if (!closed && balance <= 0) continue;      // nothing to show yet
+        if (closed && balance <= 0) continue;       // nothing was billed
+        const due = statementDueDate(card, k);
+        const key = paymentKey(card, k);
+        const rec = state.payments[key] || null;
+        rows.push({
+          key, card, cycleKey: k, start: range.start, end: range.end, closed,
+          balance, n: tx.length, due,
+          paid: !!rec, paidDate: rec ? rec.date : null,
+          paidAmount: rec && rec.amount != null ? rec.amount : null,
+          overdue: !!(!rec && closed && due && isoDate(due) < today)
+        });
+      }
+    }
+    // Soonest due first among the ones still owed; paid ones drop to the bottom.
+    rows.sort((a, b) => {
+      if (a.paid !== b.paid) return a.paid ? 1 : -1;
+      const ad = a.due ? isoDate(a.due) : "9999";
+      const bd = b.due ? isoDate(b.due) : "9999";
+      return ad < bd ? -1 : ad > bd ? 1 : 0;
+    });
+    return rows;
   }
   /* Small status pill shown on the Cards tab — confirms a marked-paid card at
      a glance, or flags one whose due date is inside the 5-day reminder window. */
@@ -1276,10 +1357,14 @@
   function renderTrack() {
     const seg =
       '<div class="seg">' +
-        '<button class="seg-btn ' + (trackView === "incoming" ? "on" : "") + '" data-action="track-view" data-v="incoming">Money coming in</button>' +
-        '<button class="seg-btn ' + (trackView === "recurring" ? "on" : "") + '" data-action="track-view" data-v="recurring">Recurring costs</button>' +
+        '<button class="seg-btn ' + (trackView === "incoming" ? "on" : "") + '" data-action="track-view" data-v="incoming">Incoming</button>' +
+        '<button class="seg-btn ' + (trackView === "bills" ? "on" : "") + '" data-action="track-view" data-v="bills">Statements</button>' +
+        '<button class="seg-btn ' + (trackView === "recurring" ? "on" : "") + '" data-action="track-view" data-v="recurring">Recurring</button>' +
       '</div>';
-    view.innerHTML = seg + (trackView === "incoming" ? trackIncoming() : trackRecurring());
+    view.innerHTML = seg +
+      (trackView === "incoming" ? trackIncoming()
+       : trackView === "bills" ? trackBills()
+       : trackRecurring());
   }
 
   // ---- incoming: cash back payouts + cancelled-order refunds ----
@@ -1432,6 +1517,84 @@
         '<div class="trk-t2">' + meta + '</div>' +
       '</div>' +
       '<div class="trk-amt num">' + money(r.amount) + '</div>' +
+    '</div>';
+  }
+
+  // ---- statements: which card bills are settled ----
+  function trackBills() {
+    const rows = buildStatements();
+    const noSetup = state.cards.filter((c) => !c.statementDay).length;
+
+    if (!rows.length) {
+      return '<div class="empty"><div class="ico">\ud83e\uddfe</div>No statements yet.' +
+        (noSetup ? '<br>Set a statement close day on your cards to track bills here.' : '') + '</div>';
+    }
+
+    const open = rows.filter((r) => r.closed && !r.paid);
+    const owed = open.reduce((s, r) => s + r.balance, 0);
+    const overdue = open.filter((r) => r.overdue).length;
+
+    let html =
+      '<div class="stat-2" style="margin-bottom:6px;">' +
+        '<div class="stat"><div class="k">Unpaid statements</div><div class="v num">' + money(owed) + '</div></div>' +
+        '<div class="stat"><div class="k">Overdue</div><div class="v num"' +
+          (overdue ? ' style="color:var(--rose)"' : '') + '>' + overdue + '</div></div>' +
+      '</div>';
+
+    const current = rows.filter((r) => !r.closed);
+    const paid = rows.filter((r) => r.closed && r.paid);
+
+    html += '<div class="section-title">To Pay</div>';
+    html += open.length
+      ? open.map(statementRow).join("")
+      : '<div class="empty" style="padding:22px 14px;">Every closed statement is settled.</div>';
+
+    if (current.length) {
+      html += '<div class="section-title">Still Open</div>' + current.map(statementRow).join("");
+    }
+    if (paid.length) {
+      html += '<div class="sub-head">Paid (' + paid.length + ')</div>' +
+        paid.slice(0, 8).map(statementRow).join("");
+    }
+    if (noSetup) {
+      html += '<div class="hint" style="margin-top:14px;">' + noSetup +
+        ' card' + (noSetup === 1 ? " has" : "s have") +
+        ' no statement close day set, so they can\u2019t be tracked here.</div>';
+    }
+    return html;
+  }
+
+  function statementRow(r) {
+    const cls = r.paid ? "done" : r.overdue ? "late" : "";
+    const period = cycleLabel(r.card, r.cycleKey);
+    let meta;
+    if (!r.closed) {
+      const days = daysUntil(r.end);
+      meta = period + " \u00b7 closes " + (days === 0 ? "today" : "in " + days + "d");
+    } else if (r.paid) {
+      meta = period + " \u00b7 paid " + dateLabel(r.paidDate);
+    } else if (r.due) {
+      const days = daysUntil(r.due);
+      meta = period + " \u00b7 due " + dateLabel(isoDate(r.due)) +
+        (days === 0 ? " \u00b7 today" : days > 0 ? " \u00b7 in " + days + "d"
+          : " \u00b7 " + Math.abs(days) + "d late");
+    } else {
+      meta = period + " \u00b7 no due day set";
+    }
+    // The open cycle isn't billed yet, so it gets no tick.
+    const control = r.closed
+      ? '<button class="trk-tick ' + (r.paid ? "on" : "") + '" data-action="toggle-statement" data-key="' +
+        esc(r.key) + '" aria-label="Mark paid">' + (r.paid ? "\u2713" : "") + '</button>'
+      : '<div class="trk-swatch" style="background:' + gradCss(r.card.gradient) + '"></div>';
+    return '<div class="trk ' + cls + '">' +
+      control +
+      '<div class="trk-body">' +
+        '<div class="trk-t1">' + esc(cardFullName(r.card)) + '</div>' +
+        '<div class="trk-t2">' + meta + '</div>' +
+      '</div>' +
+      '<div class="trk-amt num">' + money(r.paidAmount != null ? r.paidAmount : r.balance) +
+        '<span class="trk-sub">' + r.n + " txn" + (r.n === 1 ? "" : "s") + '</span>' +
+      '</div>' +
     '</div>';
   }
 
@@ -3515,6 +3678,9 @@
       renderLog();
     } else if (a === "open-report") {
       openReportSheet();
+    } else if (a === "toggle-statement") {
+      toggleStatementPaid(el.dataset.key);
+      renderTrack();
     } else if (a === "edit-payout") {
       openPayoutSheet(el.dataset.key);
     } else if (a === "add-sub") {

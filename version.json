@@ -1,5 +1,5 @@
 {
-  "version": "1.13.0",
+  "version": "1.14.0",
   "released": "2026-08-16",
-  "notes": "Card pickers show bank + card name. Cards tab gains a List view so every card is visible without scrolling. Activity uses a one-line source filter and much larger day headers. Statistics no longer colours the card chart with card finishes."
+  "notes": "New Statements view on the Track tab: every card statement with its balance, due date and paid tick, kept permanently so you can see which bills were settled and which are overdue."
 }
