@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.11.0";
+  const APP_VERSION = "1.12.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -97,6 +97,17 @@
   /* Grouped like a real embossed card number — only the last 4 digits are ever
      known, everything before them stays masked. */
   const cardNumberDisplay = (last4) => (last4 ? `•••• •••• •••• ${esc(last4)}` : "•••• •••• •••• ••••");
+
+  /* The contactless mark every modern card carries — a strong "this is a real
+     card" signal that costs nothing but a few arcs. */
+  const CONTACTLESS_SVG =
+    '<svg class="cc-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">' +
+    '<path d="M8.5 8.2a5.4 5.4 0 0 1 0 7.6"/><path d="M12 5.4a9.4 9.4 0 0 1 0 13.2"/><path d="M5.2 10.8a2 2 0 0 1 0 2.4"/></svg>';
+
+  const shortMonth = (mk) => {
+    const [y, m] = mk.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "short" });
+  };
   const GRADIENT_KEYS = Object.keys(GRADIENTS);
 
   // ---------------- state ----------------
@@ -907,9 +918,10 @@
   const view = document.getElementById("view");
   const titleEl = document.getElementById("topbarTitle");
   const actionEl = document.getElementById("topbarAction");
+  const settingsBtn = document.getElementById("settingsBtn");
   const tabbar = document.getElementById("tabbar");
   const TITLES = {
-    home: "Overview", log: "Card Purchase", cash: "Cash Spending",
+    home: "Overview", log: "Add Spending",
     cards: "My Cards", history: "Activity", track: "Track", stats: "Statistics", more: "Settings"
   };
   let tab = "home";
@@ -1053,8 +1065,9 @@
   function render() {
     recompute();
     actionEl.hidden = tab !== "cards";
+    settingsBtn.classList.toggle("on", tab === "more");
     ({
-      home: renderHome, log: renderLog, cash: renderCash, cards: renderCards,
+      home: renderHome, log: renderLog, cards: renderCards,
       history: renderHistory, track: renderTrack, stats: renderStats, more: renderMore
     }[tab])();
   }
@@ -1118,15 +1131,19 @@
             <div class="drag-handle">${DRAG_HANDLE_SVG}</div>
           </div>`;
         }
-        return `<div class="row card-mini" data-action="open-card" data-id="${c.id}">
-          <div class="cm-swatch" style="background:${gradCss(c.gradient)}"><span class="cm-chip"></span></div>
-          <div class="body">
-            <div class="t1">${esc(c.name)}</div>
-            <div class="t2">${c.issuer ? esc(c.issuer) + " · " : ""}${t.count} purchase${t.count === 1 ? "" : "s"}${c.last4 ? " · •• " + esc(c.last4) : ""}</div>
+        return `<div class="card-mini" data-action="open-card" data-id="${c.id}">
+          <div class="cm-face ${isLightGradient(c.gradient) ? "light" : ""}" style="background:${gradCss(c.gradient)}">
+            <span class="cm-chip"></span>
+            <span class="cm-dots">••••</span>
+            <span class="cm-l4">${c.last4 ? esc(c.last4) : "••••"}</span>
           </div>
-          <div class="tail">
-            <div class="a1 num" style="color:var(--mint)">+${money(t.monthCashback)}</div>
-            <div class="a2 num">${money(t.monthSpent)} spent</div>
+          <div class="cm-body">
+            <div class="cm-name">${esc(c.name)}</div>
+            <div class="cm-meta">${c.issuer ? esc(c.issuer) : "Card"}${dueBadgeHtml(c) ? " " + dueBadgeHtml(c) : ""}</div>
+          </div>
+          <div class="cm-tail">
+            <div class="cm-cb num">${money(t.monthCashback)}</div>
+            <div class="cm-sp num">${moneyShort(t.monthSpent)} spent</div>
           </div>
         </div>`;
       }).join("");
@@ -1770,7 +1787,21 @@
   // ================= LOG =================
   const draft = { cardId: null, mcc: null, amount: "", date: null, note: "" };
 
+  /* One "Add" tab for both payment methods — a segmented control beats two
+     near-identical tabs competing for space in the bar. */
+  let logMode = "card";   // card | cash
+
   function renderLog() {
+    const seg =
+      '<div class="seg seg-lg">' +
+        '<button class="seg-btn ' + (logMode === "card" ? "on" : "") + '" data-action="log-mode" data-v="card">Card</button>' +
+        '<button class="seg-btn ' + (logMode === "cash" ? "on" : "") + '" data-action="log-mode" data-v="cash">Cash</button>' +
+      '</div>';
+    if (logMode === "cash") renderCashForm(); else renderLogCard();
+    view.insertAdjacentHTML("afterbegin", seg);
+  }
+
+  function renderLogCard() {
     if (!state.cards.length) {
       view.innerHTML = `<div class="empty"><div class="ico">💳</div>Add a card first, then log purchases here.</div>`;
       return;
@@ -2040,46 +2071,45 @@
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
       return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" ${reorderCards ? `data-drag-id="${c.id}"` : `data-action="open-card" data-id="${c.id}"`}>
         ${reorderCards ? `<div class="cc-drag-handle drag-handle">${DRAG_HANDLE_SVG}</div>` : ""}
-        <div class="cc-holo"></div>
-        <div class="cc-head">
-          <div>
+        <div class="cc-sheen"></div>
+        <div class="cc-top">
+          <div class="cc-brand">
             ${c.issuer ? `<div class="cc-issuer">${esc(c.issuer)}</div>` : ""}
             <div class="cc-name">${esc(c.name)}</div>
-            ${dueBadgeHtml(c) ? `<div style="margin-top:7px;">${dueBadgeHtml(c)}</div>` : ""}
           </div>
+          <div class="cc-rate">${best}<span>%</span></div>
+        </div>
+        <div class="cc-mid">
           <div class="cc-chip"></div>
+          ${CONTACTLESS_SVG}
         </div>
-        <div class="cc-badge">up to ${best}%</div>
         <div class="cc-number num">${cardNumberDisplay(c.last4)}</div>
-        <div class="cc-foot">
-          <div class="cc-stats">
-            <div class="cc-stat">
-              <div class="cc-k">Spent this month</div>
-              <div class="cc-v num">${money(t.monthSpent)}</div>
-            </div>
-            <div class="cc-stat">
-              <div class="cc-k">Cash back</div>
-              <div class="cc-v num accent">${money(t.monthCashback)}</div>
-            </div>
-          </div>
-          <div class="cc-tail">
-            <div class="cc-sub num">Lifetime ${money(t.cashback)} back · ${money(t.spent)} spent</div>
-          </div>
-        </div>
+        <div class="cc-base">${dueBadgeHtml(c) || ""}</div>
       </div>
-      ${reorderCards ? "" : t.hasCycle ? `<div class="cyc">
-        <div class="cyc-col">
-          <div class="cyc-k">This statement <span class="cyc-dates">${esc(t.cycleLabel)}</span></div>
-          <div class="cyc-v num">${money(t.cycleCashback)}</div>
-          <div class="cyc-s num">${money(t.cycleSpent)} spent</div>
+      ${reorderCards ? "" : `<div class="cstat">
+        <div class="cstat-row">
+          <div class="cs">
+            <div class="cs-k">Spent · ${esc(shortMonth(mk))}</div>
+            <div class="cs-v num">${money(t.monthSpent)}</div>
+          </div>
+          <div class="cs">
+            <div class="cs-k">Cash back · ${esc(shortMonth(mk))}</div>
+            <div class="cs-v num mint">${money(t.monthCashback)}</div>
+          </div>
         </div>
-        <div class="cyc-sep"></div>
-        <div class="cyc-col">
-          <div class="cyc-k">Last statement <span class="cyc-dates">${esc(t.prevCycleLabel)}</span></div>
-          <div class="cyc-v num muted">${money(t.prevCycleCashback)}</div>
-          <div class="cyc-s num">${money(t.prevCycleSpent)} spent</div>
-        </div>
-      </div>` : `<div class="cyc cyc-none">Set a statement close day to track cash back by statement cycle.</div>`}`;
+        ${t.hasCycle ? `<div class="cstat-div"></div>
+        <div class="cstat-row">
+          <div class="cs">
+            <div class="cs-k">This statement<em>${esc(t.cycleLabel)}</em></div>
+            <div class="cs-v num">${money(t.cycleCashback)}</div>
+          </div>
+          <div class="cs">
+            <div class="cs-k">Last statement<em>${esc(t.prevCycleLabel)}</em></div>
+            <div class="cs-v num muted">${money(t.prevCycleCashback)}</div>
+          </div>
+        </div>` : `<div class="cstat-div"></div>
+        <div class="cstat-note">Set a statement close day to track cash back by statement cycle.</div>`}
+      </div>`}`;
     }).join("")}</div>`;
     if (reorderCards) wireDragReorder(document.getElementById("cardsStack"), reorderCardTo);
   }
@@ -2333,16 +2363,20 @@
 
     openSheet(`
       <div class="${ccClass(card.gradient)}" style="${gradStyle(card.gradient)};margin-bottom:18px;">
-        <div class="cc-holo"></div>
-        <div class="cc-head">
-          <div>${card.issuer ? `<div class="cc-issuer">${esc(card.issuer)}</div>` : ""}
-          <div class="cc-name">${esc(card.name)}</div></div>
+        <div class="cc-sheen"></div>
+        <div class="cc-top">
+          <div class="cc-brand">
+            ${card.issuer ? `<div class="cc-issuer">${esc(card.issuer)}</div>` : ""}
+            <div class="cc-name">${esc(card.name)}</div>
+          </div>
+          <div class="cc-rate">${card.rules.length ? Math.max(...card.rules.map((r) => r.rate)) : card.baseRate}<span>%</span></div>
+        </div>
+        <div class="cc-mid">
           <div class="cc-chip"></div>
+          ${CONTACTLESS_SVG}
         </div>
         <div class="cc-number num">${cardNumberDisplay(card.last4)}</div>
-        <div class="cc-foot">
-          <div><div class="cc-k">Cash back earned</div><div class="cc-v num">${money(t.cashback)}</div></div>
-        </div>
+        <div class="cc-base">${dueBadgeHtml(card) || ""}</div>
       </div>
 
       <div class="stat-2">
@@ -2743,7 +2777,7 @@
   // ================= CASH SPENDING =================
   const cashDraft = { cat: null, amount: "", date: null, note: "" };
 
-  function renderCash() {
+  function renderCashForm() {
     if (!cashDraft.cat) cashDraft.cat = state.settings.recentCash && state.settings.recentCash[0] || "food";
     if (!cashDraft.date) cashDraft.date = todayStr();
 
@@ -2794,7 +2828,7 @@
         cashDraft.note = noteEl.value;
         cashDraft.date = dateEl.value || todayStr();
         cashDraft.cat = b.dataset.pickcash;
-        renderCash();
+        renderLog();
       });
     });
 
@@ -2812,7 +2846,7 @@
       save(); recompute(); runDailyBackup();
       toast(money(amt) + " cash logged");
       cashDraft.amount = ""; cashDraft.note = "";
-      renderCash();
+      renderLog();
     });
   }
 
@@ -3414,6 +3448,9 @@
       if (state.payouts[k]) delete state.payouts[k];
       else state.payouts[k] = { date: todayStr() };
       save(); renderTrack();
+    } else if (a === "log-mode") {
+      logMode = el.dataset.v;
+      renderLog();
     } else if (a === "open-report") {
       openReportSheet();
     } else if (a === "edit-payout") {
@@ -3453,6 +3490,8 @@
   });
 
   document.getElementById("topbarAction").addEventListener("click", openAddCard);
+  // Settings moved out of the tab bar; the gear toggles in and out of it.
+  settingsBtn.addEventListener("click", () => go(tab === "more" ? "home" : "more"));
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));

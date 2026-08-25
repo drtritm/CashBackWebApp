@@ -64,6 +64,18 @@ body::before {
   background: linear-gradient(180deg, #ffffff 30%, #b9c2d4);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
+.topbar-right { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+.icon-btn {
+  width: 36px; height: 36px; border-radius: 12px; padding: 0; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); border: 1px solid var(--hairline); color: var(--text-2);
+  backdrop-filter: blur(10px);
+  transition: color 0.2s var(--ease), background 0.2s var(--ease);
+}
+.icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.icon-btn.on { color: var(--gold); background: var(--gold-soft); border-color: rgba(217,183,121,0.32); }
+.seg.seg-lg { margin-bottom: 14px; }
+
 .topbar-action {
   background: var(--surface-2); border: 1px solid var(--hairline);
   color: var(--text); border-radius: 999px; padding: 7px 15px;
@@ -75,26 +87,46 @@ body::before {
 
 /* ---------- tab bar ---------- */
 .tabbar {
-  position: fixed; left: 8px; right: 8px; bottom: calc(10px + var(--safe-b));
-  display: flex; gap: 0; z-index: 12;
-  background: rgba(18, 22, 33, 0.72);
-  backdrop-filter: blur(30px) saturate(180%); -webkit-backdrop-filter: blur(30px) saturate(180%);
-  border: 1px solid var(--hairline);
-  border-radius: 26px;
-  padding: 7px 6px;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  position: fixed; left: 14px; right: 14px; bottom: calc(12px + var(--safe-b));
+  display: flex; gap: 2px; z-index: 12;
+  background: rgba(16, 20, 30, 0.78);
+  backdrop-filter: blur(34px) saturate(180%); -webkit-backdrop-filter: blur(34px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 24px;
+  padding: 8px 8px;
+  box-shadow:
+    0 20px 48px rgba(0, 0, 0, 0.62),
+    0 2px 10px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 .tab-btn {
-  flex: 1; min-width: 0; background: none; border: none; color: var(--text-3);
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 7px 1px 5px; font-size: 9px; font-weight: 620; font-family: inherit;
-  letter-spacing: -0.01em; border-radius: 16px;
-  transition: color 0.22s var(--ease), background 0.22s var(--ease);
+  flex: 1; min-width: 0; background: none; border: none; padding: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  color: var(--text-3); font-family: inherit;
+  border-radius: 16px; position: relative;
+  transition: color 0.24s var(--ease);
 }
-.tab-btn span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-btn svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
-.tab-btn.active { color: var(--text); background: var(--surface-2); }
-.tab-btn.active svg { stroke: var(--gold); }
+/* The active pill sits behind icon+label so the highlight reads as one shape. */
+.tab-btn .tb-ico {
+  width: 40px; height: 32px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.26s var(--ease), box-shadow 0.26s var(--ease);
+}
+.tab-btn svg {
+  width: 20px; height: 20px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.tab-btn .tb-lab {
+  font-size: 9.5px; font-weight: 650; letter-spacing: 0.01em;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tab-btn.active { color: var(--gold); }
+.tab-btn.active .tb-ico {
+  background: linear-gradient(160deg, rgba(217,183,121,0.24), rgba(217,183,121,0.10));
+  box-shadow: inset 0 0 0 1px rgba(217,183,121,0.34);
+}
+.tab-btn.active .tb-lab { color: var(--text); }
+.tab-btn:active .tb-ico { transform: scale(0.92); }
 
 /* ---------- generic surfaces ---------- */
 .panel {
@@ -183,149 +215,218 @@ body::before {
 .hero .sub .item .v { font-size: 16px; font-weight: 680; margin-top: 3px; }
 
 /* ---------- credit card visual ---------- */
+/* Deliberately holds no dashboard numbers — a real card doesn't print your
+   monthly spend on its face. Figures live in the .cstat panel beneath it. */
 .cc {
   position: relative; overflow: hidden;
-  aspect-ratio: 1.586;
-  border-radius: 20px;
-  padding: 18px 20px;
-  display: flex; flex-direction: column; justify-content: space-between;
-  /* Layered: corner sheen, bottom-right falloff, then the 3-stop metallic body. */
-  background:
-    radial-gradient(125% 95% at 12% -12%, rgba(255,255,255,0.26), transparent 52%),
-    radial-gradient(105% 85% at 105% 112%, rgba(0,0,0,0.42), transparent 62%),
-    linear-gradient(135deg, var(--g1) 0%, var(--gm) 52%, var(--g2) 100%);
+  aspect-ratio: 1.585;
+  border-radius: 22px;
+  padding: 22px 24px;
+  display: flex; flex-direction: column;
+  background: linear-gradient(150deg, var(--g1) 0%, var(--gm) 48%, var(--g2) 100%);
   box-shadow:
-    0 22px 48px rgba(0, 0, 0, 0.55),
-    0 3px 8px rgba(0, 0, 0, 0.38),
-    inset 0 1px 0 rgba(255, 255, 255, 0.26),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+    0 26px 54px rgba(0, 0, 0, 0.58),
+    0 4px 12px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
   color: #fff;
-  transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease);
+  transition: transform 0.24s var(--ease), box-shadow 0.24s var(--ease);
 }
-.cc:active { transform: scale(0.978); box-shadow: 0 10px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.2); }
-/* Fine engraved lines, the way a real card catches light. */
+.cc:active { transform: scale(0.977) translateY(1px); }
+
+/* Grain + engraved hatch, faded toward the lower right. */
 .cc::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  /* Engraved diagonal hatch plus a fine metal-grain texture, layered together. */
   background-image:
-    repeating-linear-gradient(112deg, rgba(255,255,255,0.030) 0 1px, transparent 1px 9px),
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.05 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-  mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
-  -webkit-mask-image: radial-gradient(130% 100% at 15% 0%, #000 20%, transparent 72%);
+    repeating-linear-gradient(108deg, rgba(255,255,255,0.026) 0 1px, transparent 1px 10px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.045 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  mask-image: radial-gradient(140% 110% at 12% -5%, #000 15%, transparent 78%);
+  -webkit-mask-image: radial-gradient(140% 110% at 12% -5%, #000 15%, transparent 78%);
 }
-/* Angled specular sweep. */
+/* Corner light + deep bottom-right falloff, giving the plastic real curvature. */
 .cc::after {
-  content: ""; position: absolute; left: -46%; top: -110%;
-  width: 42%; height: 320%; transform: rotate(21deg);
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.13) 45%, rgba(255,255,255,0.05) 60%, transparent);
-  pointer-events: none;
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(105% 82% at 6% -14%, rgba(255,255,255,0.30), transparent 52%),
+    radial-gradient(95% 78% at 108% 116%, rgba(0,0,0,0.46), transparent 62%);
 }
-/* Small holographic foil accent, the way a real premium card catches light. */
-.cc-holo {
-  position: absolute; top: 14px; right: 60px; width: 30px; height: 20px; border-radius: 4px;
-  background: linear-gradient(120deg, #ffb3d9, #b3d4ff, #fff3ad, #b3ffd6, #ffb3d9);
-  background-size: 320% 320%;
-  opacity: 0.30; mix-blend-mode: overlay; pointer-events: none;
-  transform: rotate(-6deg);
-  animation: holoShift 7s ease-in-out infinite;
+/* A single soft specular band raked across the face. */
+.cc-sheen {
+  position: absolute; left: -30%; top: -60%;
+  width: 58%; height: 240%; transform: rotate(24deg);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.16) 42%, rgba(255,255,255,0.04) 62%, transparent);
+  pointer-events: none; z-index: 1;
 }
-@keyframes holoShift {
-  0%, 100% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
+
+.cc-top {
+  position: relative; z-index: 2;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
 }
-.cc-head { display: flex; align-items: flex-start; justify-content: space-between; position: relative; }
-.cc-issuer { font-size: 11px; font-weight: 700; letter-spacing: 0.17em; text-transform: uppercase; opacity: 0.75; }
-.cc-name { font-size: 17.5px; font-weight: 700; letter-spacing: -0.015em; margin-top: 4px; }
-.cc-number {
-  font-size: 13.5px; font-weight: 600; letter-spacing: 0.12em; opacity: 0.68;
-  margin: 14px 0 2px; position: relative;
+.cc-brand { min-width: 0; }
+.cc-issuer {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.24em;
+  text-transform: uppercase; opacity: 0.68;
+}
+.cc-name {
+  font-size: 19px; font-weight: 700; letter-spacing: -0.014em;
+  margin-top: 5px; line-height: 1.2;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Rate sits where a network mark would — reads as part of the card, not a badge. */
+.cc-rate {
+  flex-shrink: 0; font-size: 27px; font-weight: 760; letter-spacing: -0.04em;
+  line-height: 1; opacity: 0.94; text-align: right;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.28);
+}
+.cc-rate span { font-size: 14px; font-weight: 700; opacity: 0.7; margin-left: 1px; }
+
+.cc-mid {
+  position: relative; z-index: 2; margin-top: auto;
+  display: flex; align-items: center; gap: 13px;
 }
 .cc-chip {
-  width: 33px; height: 25px; border-radius: 6px; flex-shrink: 0;
-  background: linear-gradient(140deg, #f6e3ae, #c9a55f 45%, #f3dfa8);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.16);
-  position: relative;
+  width: 40px; height: 30px; border-radius: 7px; flex-shrink: 0; position: relative;
+  background: linear-gradient(135deg, #f7e7bb 0%, #c9a75c 38%, #8f6f31 62%, #f2ddaa 100%);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.24), 0 1px 2px rgba(0,0,0,0.3);
 }
 .cc-chip::before {
-  content: ""; position: absolute; inset: 5px 3px;
-  border-left: 1px solid rgba(0,0,0,0.22); border-right: 1px solid rgba(0,0,0,0.22);
-  border-top: 1px solid rgba(0,0,0,0.14); border-bottom: 1px solid rgba(0,0,0,0.14);
+  content: ""; position: absolute; inset: 6px 4px;
+  border-left: 1px solid rgba(0,0,0,0.26); border-right: 1px solid rgba(0,0,0,0.26);
+  border-top: 1px solid rgba(0,0,0,0.16); border-bottom: 1px solid rgba(0,0,0,0.16);
 }
-.cc-foot { display: flex; flex-direction: column; gap: 9px; position: relative; }
-.cc-foot::before { content: ""; display: block; height: 1px; background: rgba(255,255,255,0.14); margin: 0 0 1px; }
-.cc-stats { display: flex; gap: 22px; }
-.cc-stat { min-width: 0; }
-.cc-k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.13em; opacity: 0.66; font-weight: 660; }
-.cc-v { font-size: 19px; font-weight: 720; letter-spacing: -0.03em; margin-top: 3px; white-space: nowrap; }
-.cc-v.accent { color: #b6f5db; }
-.cc-tail { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.cc-sub { font-size: 10.5px; font-weight: 600; opacity: 0.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cc-last4 { font-size: 12.5px; font-weight: 620; letter-spacing: 0.09em; opacity: 0.82; flex-shrink: 0; }
-.cc-badge {
-  position: absolute; top: 0; right: 0;
-  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
-  padding: 4px 8px; border-radius: 999px;
-  background: rgba(0,0,0,0.30); backdrop-filter: blur(6px);
+.cc-chip::after {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 50%;
+  height: 1px; background: rgba(0,0,0,0.22);
 }
+.cc-wave { width: 21px; height: 21px; opacity: 0.72; flex-shrink: 0; }
+
+.cc-number {
+  position: relative; z-index: 2;
+  font-size: 17px; font-weight: 620; letter-spacing: 0.14em;
+  margin-top: 13px; opacity: 0.9;
+  text-shadow: 0 1px 1px rgba(0,0,0,0.34);
+}
+/* Holds the due/paid badge; stays as breathing room when there isn't one. */
+.cc-base {
+  position: relative; z-index: 2; margin-top: 10px; min-height: 22px;
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+}
+
+/* Pearl finish: dark ink, and every white overlay flipped to a black tint. */
+.cc.cc-light {
+  color: #1e1d1a;
+  box-shadow:
+    0 26px 54px rgba(0, 0, 0, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.09);
+}
+.cc.cc-light::before {
+  background-image: repeating-linear-gradient(108deg, rgba(0,0,0,0.04) 0 1px, transparent 1px 10px);
+}
+.cc.cc-light::after {
+  background:
+    radial-gradient(105% 82% at 6% -14%, rgba(255,255,255,0.85), transparent 52%),
+    radial-gradient(95% 78% at 108% 116%, rgba(0,0,0,0.13), transparent 62%);
+}
+.cc.cc-light .cc-sheen {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.85) 42%, rgba(255,255,255,0.3) 62%, transparent);
+}
+.cc.cc-light .cc-number,
+.cc.cc-light .cc-issuer { opacity: 0.55; text-shadow: none; }
+.cc.cc-light .cc-rate { text-shadow: none; }
+.cc.cc-light .cc-chip {
+  background: linear-gradient(135deg, #e0c483, #a9822f 45%, #dbb96e);
+}
+
+.card-stack { display: grid; gap: 20px; }
+
+/* Figures panel beneath each card. */
+.cstat {
+  margin: -12px 4px 0; padding: 15px 17px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-top: none; border-radius: 0 0 18px 18px;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.cstat-row { display: flex; gap: 16px; }
+.cstat-div { height: 1px; background: var(--hairline-soft); margin: 13px 0; }
+.cs { flex: 1; min-width: 0; }
+.cs-k {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase;
+  color: var(--text-3); display: block;
+}
+.cs-k em {
+  display: block; font-style: normal; font-size: 9.5px; font-weight: 600;
+  letter-spacing: 0.02em; text-transform: none; opacity: 0.8; margin-top: 2px;
+}
+.cs-v { font-size: 18px; font-weight: 730; margin-top: 7px; white-space: nowrap; }
+.cs-v.mint { color: var(--mint); }
+.cs-v.muted { color: var(--text-2); }
+.cstat-note { font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
+
+/* ---------- overview: compact card rows ---------- */
+.card-mini {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 15px; margin-bottom: 10px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: 18px;
+  transition: background 0.18s var(--ease);
+}
+.card-mini:active { background: var(--surface-2); }
+.cm-face {
+  width: 56px; height: 36px; border-radius: 8px; flex-shrink: 0; position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.24),
+    inset 0 0 0 1px rgba(255,255,255,0.09),
+    0 4px 10px rgba(0,0,0,0.38);
+  overflow: hidden;
+}
+.cm-face::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(90% 80% at 12% -20%, rgba(255,255,255,0.3), transparent 60%);
+}
+.cm-chip {
+  position: absolute; left: 6px; top: 7px; width: 11px; height: 8px; border-radius: 2px;
+  background: linear-gradient(135deg, #f4e2b0, #b18f45 55%, #ecd8a0);
+  box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.28);
+}
+.cm-dots {
+  position: absolute; left: 6px; bottom: 5px;
+  font-size: 8px; letter-spacing: 0.5px; color: rgba(255,255,255,0.62);
+}
+.cm-l4 {
+  position: absolute; right: 6px; bottom: 5px;
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em;
+  color: rgba(255,255,255,0.82); font-variant-numeric: tabular-nums;
+}
+.cm-face.light .cm-dots { color: rgba(0,0,0,0.45); }
+.cm-face.light .cm-l4 { color: rgba(0,0,0,0.68); }
+.cm-body { flex: 1; min-width: 0; }
+.cm-name {
+  font-size: 15px; font-weight: 660; letter-spacing: -0.012em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cm-meta { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+.cm-tail { text-align: right; flex-shrink: 0; }
+.cm-cb { font-size: 15.5px; font-weight: 730; color: var(--mint); }
+.cm-sp { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+
+/* Due / paid badge shown on the card face. */
 .due-badge {
   display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
   padding: 3px 8px; border-radius: 999px; background: rgba(0,0,0,0.28);
+  flex-shrink: 0;
 }
 .due-badge.paid { background: rgba(52, 211, 153, 0.22); color: #b6f5db; }
 .due-badge.warn { background: rgba(245, 176, 65, 0.22); color: #ffdca8; }
 .due-badge.urgent { background: rgba(240, 90, 90, 0.28); color: #ffc3c3; }
+.cc.cc-light .due-badge { background: rgba(0,0,0,0.07); }
 .cc.cc-light .due-badge.paid { background: rgba(14, 122, 79, 0.14); color: #0e7a4f; }
 .cc.cc-light .due-badge.warn { background: rgba(180, 110, 10, 0.14); color: #8a5a06; }
 .cc.cc-light .due-badge.urgent { background: rgba(190, 40, 40, 0.14); color: #a52424; }
-
-/* Pearl/platinum finish: dark ink instead of white, and every white-tinted overlay
-   flips to a black tint of the same opacity so the same rules keep working. */
-.cc.cc-light {
-  color: #201f1c;
-  box-shadow:
-    0 22px 48px rgba(0, 0, 0, 0.28),
-    0 3px 8px rgba(0, 0, 0, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.08);
-}
-.cc.cc-light::before {
-  background-image: repeating-linear-gradient(112deg, rgba(0,0,0,0.045) 0 1px, transparent 1px 9px);
-}
-.cc.cc-light::after {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.9) 45%, rgba(255,255,255,0.35) 60%, transparent);
-}
-.cc.cc-light .cc-badge { background: rgba(0,0,0,0.08); color: #201f1c; }
-.cc.cc-light .cc-v.accent { color: #0e7a4f; }
-.cc.cc-light .cc-issuer, .cc.cc-light .cc-k, .cc.cc-light .cc-sub { opacity: 0.55; }
-.cc.cc-light .cc-last4, .cc.cc-light .cc-number { opacity: 0.5; }
-.cc.cc-light .cc-foot::before { background: rgba(0,0,0,0.12); }
-.cc.cc-light .cc-chip {
-  background: linear-gradient(140deg, #d9b968, #a9822f 45%, #d6b562);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.22);
-}
-
-.card-stack { display: grid; gap: 15px; }
-
-/* Statement-cycle strip, pulled up so it reads as part of the card above it. */
-.cyc {
-  display: flex; align-items: stretch; gap: 12px;
-  margin: -9px 2px 0; padding: 12px 15px;
-  background: var(--surface); border: 1px solid var(--hairline-soft);
-  border-radius: 0 0 var(--r-md) var(--r-md);
-}
-.cyc-col { flex: 1; min-width: 0; }
-.cyc-sep { width: 1px; background: var(--hairline-soft); flex-shrink: 0; }
-.cyc-k {
-  font-size: 9.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
-  color: var(--text-3); display: flex; flex-direction: column; gap: 2px;
-}
-.cyc-dates { font-size: 9.5px; letter-spacing: 0.02em; text-transform: none; font-weight: 600; opacity: 0.85; }
-.cyc-v { font-size: 17px; font-weight: 730; color: var(--mint); margin-top: 6px; }
-.cyc-v.muted { color: var(--text-2); }
-.cyc-s { font-size: 11px; color: var(--text-3); margin-top: 2px; }
-.cyc.cyc-none {
-  display: block; font-size: 12px; color: var(--text-3); line-height: 1.5;
-}
+.cm-meta .due-badge { background: var(--surface-2); font-size: 9.5px; padding: 2px 7px; margin-left: 4px; }
 
 /* ---------- list rows ---------- */
 .row {
@@ -484,31 +585,17 @@ body::before {
 
 .cash-grid { grid-template-columns: 1fr 1fr; }
 
-/* Overview's compact card rows — a quick scan when there are many cards,
-   full luxury card art lives on the Cards tab instead. */
-.card-mini .cm-swatch {
-  width: 46px; height: 32px; border-radius: 9px; flex-shrink: 0; position: relative;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16), 0 3px 8px rgba(0,0,0,0.35);
-}
-.card-mini .cm-chip {
-  position: absolute; right: 5px; bottom: 5px; width: 10px; height: 7px; border-radius: 2px;
-  background: linear-gradient(140deg, #f0dcae, #b6923f 60%, #eed9a4);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
-}
-.card-mini .tail .a1 { font-size: 15px; font-weight: 720; }
-.card-mini .tail .a2 { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
-
-.rp-preview {
-  margin-bottom: 14px; border-radius: 12px; overflow: hidden;
-  border: 1px solid var(--hairline-soft); background: #07090f;
-}
-.rp-preview canvas { display: block; }
-
+/* Minimum-spend shortfall — a warning beside the earned figure, never replacing it. */
 .pv-warn {
   margin-top: 9px; padding: 8px 10px; border-radius: 9px;
   background: var(--amber-soft); color: var(--amber);
   font-size: 12px; font-weight: 620; line-height: 1.45;
 }
+.rp-preview {
+  margin-bottom: 14px; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--hairline-soft); background: #07090f;
+}
+.rp-preview canvas { display: block; }
 
 /* ---------- track tab (payouts, subs, fees, refunds) ---------- */
 .trk {

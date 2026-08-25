@@ -1,5 +1,5 @@
 {
-  "version": "1.11.0",
+  "version": "1.12.0",
   "released": "2026-08-16",
-  "notes": "Minimum-spend requirements no longer zero out cash back — every transaction earns and the shortfall shows as a warning. Cash back payouts can be edited or adjusted. Monthly spending report exports as an image or PDF. Fixed the Other category highlight."
+  "notes": "Redesigned cards — the face now looks like a real card and the figures sit in a panel beneath it. Tab bar reduced from eight tabs to six: Card and Cash logging merged into one Add tab, and Settings moved to the header."
 }
