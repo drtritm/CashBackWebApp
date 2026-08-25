@@ -570,6 +570,42 @@ body::before {
 .mb-nums { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; font-weight: 650; color: var(--text-3); }
 .mb-cb { color: var(--mint); }
 
+/* Activity date range: presets, plus a detail row for Month / Custom. */
+.range-chips { margin-bottom: 10px; }
+.range-custom {
+  display: flex; gap: 9px; margin-bottom: 10px;
+}
+.rc-field {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px;
+  padding: 9px 12px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: 13px;
+}
+.rc-field span {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.11em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.rc-field input[type="date"] {
+  background: none; border: none; padding: 0; border-radius: 0;
+  font-size: 14px; font-weight: 640; color: var(--text);
+  min-height: 20px;
+}
+.rc-field input[type="date"]:focus { outline: none; }
+
+/* Confirms what's on screen and totals it in one line. */
+.range-sum {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 11px 15px; margin-bottom: 12px;
+  background: var(--gold-soft); border: 1px solid rgba(217,183,121,0.28);
+  border-radius: 13px;
+}
+.rs-label {
+  font-size: 13.5px; font-weight: 700; color: var(--text); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rs-nums { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; font-size: 13.5px; font-weight: 700; }
+.rs-cb { color: var(--mint); font-size: 12.5px; }
+
 /* Day header carries real weight — it was too small to scan past a long list. */
 .day-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

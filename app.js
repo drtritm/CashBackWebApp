@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.14.0";
+  const APP_VERSION = "1.16.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -522,6 +522,15 @@
     return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
   }
   const dateLabel = (s) => parseDate(s).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  /* Spelled-out day used by the Activity day picker, e.g. "Mon, 25 August 2026". */
+  function fullDayLabel(s2) {
+    const today = todayStr();
+    const d = parseDate(s2);
+    const nice = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "long", year: "numeric" });
+    if (s2 === today) return "Today \u00b7 " + nice;
+    return nice;
+  }
+
   /* Day heading in Activity — "Today"/"Yesterday" when close, otherwise weekday + date. */
   function dayLabel(s) {
     const today = todayStr();
@@ -1013,22 +1022,75 @@
   let histFilter = "all";
   // "all" shows the full timeline (unchanged default); a "YYYY-MM" key narrows
   // Activity to one billing month, stepped through with the Prev/Next arrows.
-  let histMonth = "all";
+  /* Activity date range. mode drives everything; month/from/to hold the detail
+     for the two modes that need it. */
+  let histRange = { mode: "all", month: null, from: null, to: null };
   // Reorder mode is tracked separately per screen since Home and Cards render
   // the card list differently, but both write to the same state.cards order.
   let reorderHome = false;
   let reorderCards = false;
 
-  /* Step Activity's month filter. dir=1 moves further into the past, dir=-1
-     moves back toward the present and eventually to "all". Only steps through
-     months that actually have a transaction under the current card/cash filter. */
+  const HIST_PRESETS = [
+    ["all", "All"], ["today", "Today"], ["week", "7 days"],
+    ["month30", "30 days"], ["month", "Month"], ["custom", "Custom"]
+  ];
+
+  /* Resolve the active range to concrete from/to dates (inclusive), or null for
+     "everything". One place decides the dates, so filtering and the summary label
+     can never disagree. */
+  function histBounds() {
+    const r = histRange;
+    const today = todayStr();
+    if (r.mode === "all") return null;
+    if (r.mode === "today") return { from: today, to: today };
+    if (r.mode === "week" || r.mode === "month30") {
+      const back = r.mode === "week" ? 6 : 29;
+      const d = parseDate(today);
+      d.setDate(d.getDate() - back);
+      return { from: isoDate(d), to: today };
+    }
+    if (r.mode === "month" && r.month) {
+      const [y, m] = r.month.split("-").map(Number);
+      return { from: r.month + "-01", to: isoDate(new Date(y, m, 0)) };
+    }
+    if (r.mode === "custom") {
+      // Either end may be blank — an open-ended range is still useful.
+      let from = r.from || null, to = r.to || null;
+      if (from && to && from > to) { const sw = from; from = to; to = sw; }
+      if (!from && !to) return null;
+      return { from: from || "0000-01-01", to: to || "9999-12-31" };
+    }
+    return null;
+  }
+  const inHistRange = (dateStr) => {
+    const b = histBounds();
+    return !b || (dateStr >= b.from && dateStr <= b.to);
+  };
+
+  function histRangeLabel() {
+    const r = histRange, b = histBounds();
+    if (!b) return "All time";
+    if (r.mode === "today") return "Today";
+    if (r.mode === "week") return "Last 7 days";
+    if (r.mode === "month30") return "Last 30 days";
+    if (r.mode === "month") return monthLabel(r.month);
+    if (b.from === b.to) return fullDayLabel(b.from);
+    const f = b.from === "0000-01-01" ? "Everything" : dateLabel(b.from);
+    const t = b.to === "9999-12-31" ? "now" : dateLabel(b.to);
+    return f + " \u2013 " + t;
+  }
+
+  /* Step the month window. Only visits months that actually have a transaction
+     under the current source filter, so it never lands on an empty screen. */
   function histMonthStep(dir) {
     const scoped = state.transactions.filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter));
     const monthKeys = [...new Set(scoped.map((t) => t.date.slice(0, 7)))].sort().reverse();
-    let idx = histMonth === "all" ? -1 : monthKeys.indexOf(histMonth);
-    idx = Math.max(-1, Math.min(monthKeys.length - 1, idx + dir));
-    histMonth = idx === -1 ? "all" : monthKeys[idx];
-    render();
+    if (!monthKeys.length) return;
+    let idx = monthKeys.indexOf(histRange.month);
+    if (idx === -1) idx = 0;
+    idx = Math.max(0, Math.min(monthKeys.length - 1, idx + dir));
+    histRange = { mode: "month", month: monthKeys[idx], from: null, to: null };
+    renderHistory();
   }
 
   /* Move a card straight to a destination index in state.cards — the single
@@ -2855,23 +2917,52 @@
 
     const scoped = state.transactions.filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter));
     const monthKeys = [...new Set(scoped.map((t) => t.date.slice(0, 7)))].sort().reverse();
-    if (histMonth !== "all" && !monthKeys.includes(histMonth)) histMonth = "all";
-    const navIdx = histMonth === "all" ? -1 : monthKeys.indexOf(histMonth);
-    const canOlder = navIdx < monthKeys.length - 1;
-    const canNewer = navIdx > -1;
-    const monthNav = monthKeys.length ? `<div class="month-nav">
-        <button class="month-nav-btn" data-action="hist-month" data-dir="1" ${canOlder ? "" : "disabled"} aria-label="Older month">‹</button>
-        <div class="month-nav-label">${histMonth === "all" ? "All time" : monthLabel(histMonth)}</div>
-        <button class="month-nav-btn" data-action="hist-month" data-dir="-1" ${canNewer ? "" : "disabled"} aria-label="Newer month">›</button>
-      </div>` : "";
+    if (histRange.mode === "month" && !monthKeys.includes(histRange.month)) {
+      histRange.month = monthKeys[0] || todayStr().slice(0, 7);
+    }
 
-    const list = (histMonth === "all" ? scoped : scoped.filter((t) => t.date.slice(0, 7) === histMonth))
+    const presets = '<div class="chips range-chips">' +
+      HIST_PRESETS.map(([m, lbl]) =>
+        '<button class="chip ' + (histRange.mode === m ? "active" : "") + '" data-action="hist-range" data-m="' + m + '">' + lbl + '</button>'
+      ).join("") + '</div>';
+
+    let detail = "";
+    if (histRange.mode === "month") {
+      const idx = monthKeys.indexOf(histRange.month);
+      detail = `<div class="month-nav">
+        <button class="month-nav-btn" data-action="hist-month" data-dir="1" ${idx < monthKeys.length - 1 ? "" : "disabled"} aria-label="Older month">‹</button>
+        <div class="month-nav-label">${monthLabel(histRange.month)}</div>
+        <button class="month-nav-btn" data-action="hist-month" data-dir="-1" ${idx > 0 ? "" : "disabled"} aria-label="Newer month">›</button>
+      </div>`;
+    } else if (histRange.mode === "custom") {
+      detail = `<div class="range-custom">
+        <label class="rc-field"><span>From</span><input type="date" id="histFrom" value="${histRange.from || ""}" /></label>
+        <label class="rc-field"><span>To</span><input type="date" id="histTo" value="${histRange.to || ""}" /></label>
+      </div>`;
+    }
+
+    const list = scoped.filter((t) => inHistRange(t.date))
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)));
 
-    if (!list.length) return void (view.innerHTML = chips + monthNav + '<div class="empty">Nothing logged here yet.</div>');
+    // Range summary doubles as confirmation of what's on screen.
+    const rSpend = list.reduce((sum, t) => sum + t.amount, 0);
+    const rBack = list.reduce((sum, t) => sum + t._cb, 0);
+    const summary = '<div class="range-sum">' +
+      '<div class="rs-label">' + esc(histRangeLabel()) + '</div>' +
+      '<div class="rs-nums"><span class="num">' + money(rSpend) + '</span>' +
+      (rBack > 0 ? '<span class="rs-cb num">+' + money(rBack) + '</span>' : "") + '</div>' +
+    '</div>';
+
+    const header = chips + presets + detail + (list.length ? summary : "");
+
+    if (!list.length) {
+      return void (view.innerHTML = header +
+        '<div class="empty">Nothing logged in ' + esc(histRangeLabel().toLowerCase()) + '.' +
+        (histRange.mode === "custom" ? '<br>Try widening the dates.' : '<br>Pick another range above.') + '</div>');
+    }
 
     // Grouped month → day, each header carrying its own totals.
-    let html = chips + monthNav, lastMonth = null, lastDay = null;
+    let html = header, lastMonth = null, lastDay = null;
     for (const t of list) {
       const mk = t.date.slice(0, 7);
       if (mk !== lastMonth) {
@@ -2931,10 +3022,13 @@
       }
     }
     view.innerHTML = html;
+    const fromEl = document.getElementById("histFrom");
+    const toEl = document.getElementById("histTo");
+    if (fromEl) fromEl.addEventListener("change", () => { histRange.from = fromEl.value || null; renderHistory(); });
+    if (toEl) toEl.addEventListener("change", () => { histRange.to = toEl.value || null; renderHistory(); });
     const fsel = document.getElementById("histFilterSel");
     if (fsel) fsel.addEventListener("change", () => {
       histFilter = fsel.value;
-      histMonth = "all";
       renderHistory();
     });
   }
@@ -3620,7 +3714,18 @@
       render();
       openCardDetail(el.dataset.id);
     }
-    else if (a === "filter") { histFilter = el.dataset.id; histMonth = "all"; render(); }
+    else if (a === "filter") { histFilter = el.dataset.id; render(); }
+    else if (a === "hist-range") {
+      const m = el.dataset.m;
+      if (m === "month" && !histRange.month) histRange.month = todayStr().slice(0, 7);
+      if (m === "custom" && !histRange.from && !histRange.to) {
+        // Seed a sensible window so Custom isn't blank on first open.
+        const d = parseDate(todayStr()); d.setDate(d.getDate() - 29);
+        histRange.from = isoDate(d); histRange.to = todayStr();
+      }
+      histRange.mode = m;
+      renderHistory();
+    }
     else if (a === "hist-month") histMonthStep(Number(el.dataset.dir));
     else if (a === "save-card") {
       const c = getCard(el.dataset.id);

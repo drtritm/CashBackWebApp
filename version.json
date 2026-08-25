@@ -1,5 +1,5 @@
 {
-  "version": "1.14.0",
+  "version": "1.16.0",
   "released": "2026-08-16",
-  "notes": "New Statements view on the Track tab: every card statement with its balance, due date and paid tick, kept permanently so you can see which bills were settled and which are overdue."
+  "notes": "Activity gets a proper date filter: All, Today, 7 days, 30 days, a month browser, or a custom from-to range, with a running total for whatever range is selected."
 }
