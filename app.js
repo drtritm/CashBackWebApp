@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.12.0";
+  const APP_VERSION = "1.13.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -96,6 +96,10 @@
 
   /* Grouped like a real embossed card number — only the last 4 digits are ever
      known, everything before them stays masked. */
+  /* Bank + product, e.g. "Sacombank UniQ" — a bare product name is ambiguous
+     once you hold several cards with names like "Cash Back". */
+  const cardFullName = (c) => (c ? ((c.issuer ? c.issuer + " " : "") + c.name) : "");
+
   const cardNumberDisplay = (last4) => (last4 ? `•••• •••• •••• ${esc(last4)}` : "•••• •••• •••• ••••");
 
   /* The contactless mark every modern card carries — a strong "this is a real
@@ -1515,7 +1519,7 @@
       '</div>' +
       '<div class="field"><label>Paid with</label><select id="sb_card">' +
         '<option value="">No card / cash</option>' +
-        state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(c.name) + '</option>').join("") +
+        state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
       '</select></div>' +
       (existing ? '<label class="toggle-row" style="margin:4px 0 14px;">' +
         '<span><span class="tr-t1">Active</span><span class="tr-t2">Turn off to keep it listed but stop counting the cost</span></span>' +
@@ -1566,7 +1570,7 @@
         '<div class="field"><label>Cancelled on</label><input id="rf_date" type="date" value="' + (d.date || todayStr()) + '" /></div>' +
         '<div class="field"><label>Paid with</label><select id="rf_card">' +
           '<option value="">No card / cash</option>' +
-          state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(c.name) + '</option>').join("") +
+          state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
         '</select></div>' +
       '</div>' +
       '<div class="field"><label>Note</label><input id="rf_note" type="text" placeholder="Optional" value="' + esc(d.note || "") + '" /></div>' +
@@ -1747,11 +1751,20 @@
       srcRows.push({ key: "__cash", name: "Cash", icon: "💵", value: cashSpend, cb: 0, n: txns.filter(isCash).length });
     }
     srcRows.sort((a, b) => b.value - a.value);
-    const srcColor = (r) => (r.card ? gradCss(r.card.gradient) : "#4a5566");
+    /* Chart colour must separate the series, and users pick card finishes that
+       are often near-identical (two navies, two golds). So the payment-source
+       chart uses the validated categorical palette in fixed rank order instead
+       of the card's own finish — the card colour stays on the Cards tab where it
+       identifies the physical card. Cash always takes the neutral slot. */
+    const srcPalette = {};
+    srcRows.forEach((r, i) => {
+      srcPalette[r.key] = r.key === "__cash" ? PIE_OTHER : PIE_COLORS[i % PIE_COLORS.length];
+    });
+    const srcColor = (r) => srcPalette[r.key];
 
     let body;
     if (statsView === "pie") {
-      const srcSlices = srcRows.map((r) => Object.assign({}, r, { color: r.card ? grad(r.card.gradient)[0] : PIE_OTHER }));
+      const srcSlices = srcRows.map((r) => Object.assign({}, r, { color: srcColor(r) }));
       body =
         '<div class="section-title">Spending by Category<span class="link num">' + money(totalSpend) + '</span></div>' +
         donut(catSlices, moneyShort(totalSpend), label) +
@@ -1834,7 +1847,7 @@
         <div class="field">
           <label>Card</label>
           <select id="f_card">
-            ${state.cards.map((c) => `<option value="${c.id}" ${c.id === draft.cardId ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+            ${state.cards.map((c) => `<option value="${c.id}" ${c.id === draft.cardId ? "selected" : ""}>${esc(cardFullName(c))}</option>`).join("")}
           </select>
         </div>
         <div class="field">
@@ -2041,6 +2054,29 @@
   }
 
   // ================= CARDS =================
+  /* Gallery shows full card art (one card fills most of the screen); List keeps
+     every card visible at once so you don't scroll to the end to find one. */
+  let cardsView = "gallery";   // gallery | list
+
+  function cardListRow(c) {
+    const t = cardTotals(c.id);
+    const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
+    return `<div class="clist" data-action="open-card" data-id="${c.id}">
+      <div class="cl-face ${isLightGradient(c.gradient) ? "light" : ""}" style="background:${gradCss(c.gradient)}">
+        <span class="cm-chip"></span>
+        <span class="cm-l4">${c.last4 ? esc(c.last4) : "••••"}</span>
+      </div>
+      <div class="cl-body">
+        <div class="cl-name">${esc(c.name)}</div>
+        <div class="cl-meta">${c.issuer ? esc(c.issuer) : "Card"} · up to ${best}%${dueBadgeHtml(c) ? " " + dueBadgeHtml(c) : ""}</div>
+      </div>
+      <div class="cl-tail">
+        <div class="cl-cb num">${money(t.monthCashback)}</div>
+        <div class="cl-sp num">${moneyShort(t.monthSpent)} spent</div>
+      </div>
+    </div>`;
+  }
+
   function renderCards() {
     if (!state.cards.length) {
       view.innerHTML = `<div class="empty"><div class="ico">💳</div>No cards yet.<br>Tap <b>Add</b> in the top right.</div>`;
@@ -2062,11 +2098,17 @@
           <div class="item"><div class="k">Lifetime</div><div class="v num">${moneyShort(lifetimeCb)}</div></div>
         </div>
       </div>
+      ${state.cards.length > 1 ? `<div class="seg">
+        <button class="seg-btn ${cardsView === "gallery" ? "on" : ""}" data-action="cards-view" data-v="gallery">Gallery</button>
+        <button class="seg-btn ${cardsView === "list" ? "on" : ""}" data-action="cards-view" data-v="list">List</button>
+      </div>` : ""}
       <div class="section-title">Your Cards
         ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-cards">${reorderCards ? "Done" : "Reorder"}</span>` : ""}
       </div>
       ${reorderCards ? `<div class="hint" style="margin:-2px 4px 10px;">Press and drag a handle to move a card.</div>` : ""}
-      <div class="card-stack ${reorderCards ? "reorder" : ""}" id="cardsStack">${state.cards.map((c) => {
+      ${cardsView === "list" && !reorderCards
+        ? `<div class="clist-wrap">${state.cards.map(cardListRow).join("")}</div>`
+        : `<div class="card-stack ${reorderCards ? "reorder" : ""}" id="cardsStack">${state.cards.map((c) => {
       const t = cardTotals(c.id);
       const best = c.rules.length ? Math.max(...c.rules.map((r) => r.rate)) : c.baseRate;
       return `<div class="${ccClass(c.gradient)}" style="${gradStyle(c.gradient)}" ${reorderCards ? `data-drag-id="${c.id}"` : `data-action="open-card" data-id="${c.id}"`}>
@@ -2110,7 +2152,7 @@
         </div>` : `<div class="cstat-div"></div>
         <div class="cstat-note">Set a statement close day to track cash back by statement cycle.</div>`}
       </div>`}`;
-    }).join("")}</div>`;
+    }).join("")}</div>`}`;
     if (reorderCards) wireDragReorder(document.getElementById("cardsStack"), reorderCardTo);
   }
 
@@ -2630,13 +2672,23 @@
       view.innerHTML = '<div class="empty"><div class="ico">🧾</div>Nothing logged yet.<br>Add a purchase from <b>Log</b> or <b>Cash</b>.</div>';
       return;
     }
-    // Wraps to as many rows as needed — every card stays reachable in one glance,
-    // no horizontal swipe required to find the right filter.
-    const chips = '<div class="chips chips-wrap">' +
-      '<button class="chip ' + (histFilter === "all" ? "active" : "") + '" data-action="filter" data-id="all">All</button>' +
-      state.cards.map((c) => '<button class="chip ' + (histFilter === c.id ? "active" : "") + '" data-action="filter" data-id="' + c.id + '">' + esc(c.name) + '</button>').join("") +
-      '<button class="chip ' + (histFilter === "cash" ? "active" : "") + '" data-action="filter" data-id="cash">💵 Cash</button>' +
-      '</div>';
+    /* A dropdown rather than a chip row: with several cards the chips wrapped
+       into a block of buttons that dominated the screen. One line, any number
+       of cards. */
+    const filterName = histFilter === "all" ? "All sources"
+      : histFilter === "cash" ? "Cash only"
+      : cardFullName(getCard(histFilter)) || "All sources";
+    const chips = '<div class="act-filter">' +
+      '<span class="af-k">Showing</span>' +
+      '<div class="af-sel">' +
+        '<select id="histFilterSel">' +
+          '<option value="all" ' + (histFilter === "all" ? "selected" : "") + '>All sources</option>' +
+          state.cards.map((c) => '<option value="' + c.id + '" ' + (histFilter === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
+          '<option value="cash" ' + (histFilter === "cash" ? "selected" : "") + '>Cash only</option>' +
+        '</select>' +
+        '<span class="af-val">' + esc(filterName) + '</span>' +
+      '</div>' +
+    '</div>';
 
     const scoped = state.transactions.filter((t) => histFilter === "all" || (histFilter === "cash" ? isCash(t) : t.cardId === histFilter));
     const monthKeys = [...new Set(scoped.map((t) => t.date.slice(0, 7)))].sort().reverse();
@@ -2677,11 +2729,12 @@
         const dBack = dTx.reduce((s, x) => s + x._cb, 0);
         html += '<div class="day-bar">' +
           '<div class="db-left">' +
-            '<span class="db-day">' + dayLabel(t.date) + '</span>' +
-            '<span class="db-count">' + dTx.length + ' item' + (dTx.length === 1 ? "" : "s") + '</span>' +
+            '<div class="db-day">' + dayLabel(t.date) + '</div>' +
+            '<div class="db-count">' + dTx.length + ' item' + (dTx.length === 1 ? "" : "s") + '</div>' +
           '</div>' +
-          '<div class="db-right"><span class="num">' + money(dSpend) + '</span>' +
-          (dBack > 0 ? '<span class="db-cb num">+' + money(dBack) + '</span>' : "") +
+          '<div class="db-right">' +
+            '<div class="db-spend num">' + money(dSpend) + '</div>' +
+            (dBack > 0 ? '<div class="db-cb num">+' + money(dBack) + ' back</div>' : "") +
           '</div>' +
         '</div>';
         lastDay = t.date;
@@ -2715,6 +2768,12 @@
       }
     }
     view.innerHTML = html;
+    const fsel = document.getElementById("histFilterSel");
+    if (fsel) fsel.addEventListener("change", () => {
+      histFilter = fsel.value;
+      histMonth = "all";
+      renderHistory();
+    });
   }
 
   function openTxn(id) {
@@ -2739,7 +2798,7 @@
           </button>
         </div>
         <div class="field"><label>Card</label>
-          <select id="e_card">${state.cards.map((c) => `<option value="${c.id}" ${c.id === t.cardId ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+          <select id="e_card">${state.cards.map((c) => `<option value="${c.id}" ${c.id === t.cardId ? "selected" : ""}>${esc(cardFullName(c))}</option>`).join("")}</select>
         </div>
         <div class="row-2">
           <div class="field"><label>Date</label><input id="e_date" type="date" value="${t.date}" /></div>
@@ -3448,6 +3507,9 @@
       if (state.payouts[k]) delete state.payouts[k];
       else state.payouts[k] = { date: todayStr() };
       save(); renderTrack();
+    } else if (a === "cards-view") {
+      cardsView = el.dataset.v;
+      renderCards();
     } else if (a === "log-mode") {
       logMode = el.dataset.v;
       renderLog();

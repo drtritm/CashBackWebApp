@@ -570,16 +570,77 @@ body::before {
 .mb-nums { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; font-weight: 650; color: var(--text-3); }
 .mb-cb { color: var(--mint); }
 
+/* Day header carries real weight — it was too small to scan past a long list. */
 .day-bar {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-  padding: 7px 12px; margin: 12px 0 6px;
-  background: rgba(255,255,255,0.035); border-radius: 10px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 15px; margin: 18px 0 9px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-left: 3px solid var(--gold);
+  border-radius: 12px;
 }
-.db-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.db-day { font-size: 13px; font-weight: 680; }
-.db-count { font-size: 11px; color: var(--text-3); }
-.db-right { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 640; flex-shrink: 0; }
-.db-cb { color: var(--mint); }
+.db-left { min-width: 0; }
+.db-day {
+  font-size: 16px; font-weight: 720; letter-spacing: -0.015em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.db-count { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+.db-right { text-align: right; flex-shrink: 0; }
+.db-spend { font-size: 16px; font-weight: 720; letter-spacing: -0.02em; }
+.db-cb { font-size: 12px; font-weight: 650; color: var(--mint); margin-top: 3px; }
+
+/* Activity source filter — one line whatever the card count. */
+.act-filter {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; margin-bottom: 10px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: 14px;
+}
+.af-k {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-3); flex-shrink: 0;
+}
+.af-sel { position: relative; flex: 1; min-width: 0; }
+.af-sel select {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; border: none; padding: 0; margin: 0;
+}
+.af-val {
+  display: block; font-size: 14.5px; font-weight: 660; color: var(--text);
+  padding-right: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3adc2' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right center / 16px;
+}
+
+/* Cards tab — compact list so every card is visible without scrolling. */
+.clist-wrap { display: flex; flex-direction: column; }
+.clist {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 15px; margin-bottom: 9px;
+  background: var(--surface); border: 1px solid var(--hairline-soft);
+  border-radius: 16px;
+  transition: background 0.18s var(--ease);
+}
+.clist:active { background: var(--surface-2); }
+.cl-face {
+  width: 50px; height: 33px; border-radius: 7px; flex-shrink: 0; position: relative;
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), inset 0 0 0 1px rgba(255,255,255,0.09),
+              0 3px 8px rgba(0,0,0,0.36);
+}
+.cl-face::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(90% 80% at 12% -20%, rgba(255,255,255,0.28), transparent 60%);
+}
+.cl-face .cm-l4 { right: 5px; bottom: 4px; font-size: 8px; }
+.cl-face.light .cm-l4 { color: rgba(0,0,0,0.68); }
+.cl-body { flex: 1; min-width: 0; }
+.cl-name {
+  font-size: 15px; font-weight: 660; letter-spacing: -0.012em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cl-meta { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+.cl-tail { text-align: right; flex-shrink: 0; }
+.cl-cb { font-size: 15px; font-weight: 730; color: var(--mint); }
+.cl-sp { font-size: 11px; color: var(--text-3); margin-top: 3px; }
 .row.txn { margin-bottom: 7px; }
 .tag.cash { color: var(--text-2); background: var(--surface-2); }
 

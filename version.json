@@ -1,5 +1,5 @@
 {
-  "version": "1.12.0",
+  "version": "1.13.0",
   "released": "2026-08-16",
-  "notes": "Redesigned cards — the face now looks like a real card and the figures sit in a panel beneath it. Tab bar reduced from eight tabs to six: Card and Cash logging merged into one Add tab, and Settings moved to the header."
+  "notes": "Card pickers show bank + card name. Cards tab gains a List view so every card is visible without scrolling. Activity uses a one-line source filter and much larger day headers. Statistics no longer colours the card chart with card finishes."
 }
