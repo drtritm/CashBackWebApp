@@ -1,5 +1,5 @@
 /* Bump APP_VERSION here and in app.js + version.json together on every release. */
-const APP_VERSION = "1.10.0";
+const APP_VERSION = "1.11.0";
 const CACHE_NAME = "cashback-tracker-v" + APP_VERSION;
 
 const ASSETS = [

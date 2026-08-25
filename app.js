@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.10.0";
+  const APP_VERSION = "1.11.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -621,15 +621,15 @@
     );
     for (const t of sorted) {
       // Cash earns nothing — it is tracked for spending totals only.
-      if (isCash(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._pending = false; continue; }
+      if (isCash(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const card = getCard(t.cardId);
-      if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._pending = false; continue; }
+      if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const base = card.baseRate || 0;
       const { rule, rate } = matchRule(card, t.mcc);
       t._ruleId = rule ? rule.id : null;
       t._rate = rate;
       t._capped = false;
-      t._pending = false;
+      t._belowMin = false;
       t._shortfall = 0;
 
       // Rule-level minimum-spend gate (MB JCB Platinum: needs 2tr on Shopee this
@@ -645,15 +645,16 @@
         }
       }
 
-      let cb, bonusPart = 0, acc4rule = null, eligibleSpend = 0;
+      // A minimum-spend requirement is a note, not a block: every transaction still
+      // earns and counts its cash back. The shortfall is surfaced as a warning so
+      // you know the cycle hasn't cleared the bar yet.
       if (ruleGated) {
-        // Doesn't qualify yet — earns nothing, and doesn't burn the rule's own
-        // cashback cap since it never actually got the bonus rate.
-        cb = 0;
-        t._pending = true;
+        t._belowMin = true;
         t._shortfall = ruleShortfall;
-        t._cbPotential = (t.amount * rate) / 100;
-      } else if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
+      }
+
+      let cb, bonusPart = 0, acc4rule = null, eligibleSpend = 0;
+      if (!rule || !rule.cap || !(rule.cap.amount > 0)) {
         cb = (t.amount * rate) / 100;
         bonusPart = cb;
       } else {
@@ -694,12 +695,11 @@
         const pk = capPeriodKey(card, t.date, card.cardCap.period || "monthly");
         const k = `${card.id}|${pk}`;
         if (card.cardCap.minSpend > 0 && (spendAcc[k] || 0) < card.cardCap.minSpend) {
-          // Cycle hasn't qualified yet — show what it would pay, but count zero.
-          t._pending = true;
+          // Flag the shortfall but still pay out — the bar is informational.
+          t._belowMin = true;
           t._shortfall = card.cardCap.minSpend - (spendAcc[k] || 0);
-          t._cbPotential = cb;
-          cb = 0;
-        } else if (card.cardCap.amount > 0) {
+        }
+        if (card.cardCap.amount > 0) {
           const used = cardAcc[k] || 0;
           const remain = Math.max(0, card.cardCap.amount - used);
           if (cb > remain) { cb = remain; t._capped = true; }
@@ -780,35 +780,35 @@
       if (lim >= 0 && cashback > lim) { cashback = lim; capped = true; txnLimited = true; }
     }
 
-    // Card-wide cap and minimum-spend gate.
-    let pending = false, shortfall = 0, cardRemaining = null, gateKind = null;
+    /* Minimum-spend requirements are reported, never deducted. The transaction
+       keeps its full cash back; the shortfall is shown so you know the cycle
+       still has to clear the bar for the bank to actually pay. */
+    let belowMin = false, shortfall = 0, cardRemaining = null, gateKind = null;
     const potential = cashback;
     if (card.cardCap) {
       const u = cardCapUsage(card, dateStr) || { used: 0, spend: 0 };
       if (card.cardCap.minSpend > 0 && u.spend + amount < card.cardCap.minSpend) {
-        // Nothing pays out until the cycle qualifies — show 0, keep the potential.
-        pending = true;
+        belowMin = true;
         shortfall = card.cardCap.minSpend - (u.spend + amount);
         gateKind = "card";
-        cashback = 0;
-      } else if (card.cardCap.amount > 0) {
+      }
+      if (card.cardCap.amount > 0) {
         cardRemaining = Math.max(0, card.cardCap.amount - u.used);
         if (cashback > cardRemaining) { cashback = cardRemaining; capped = true; }
       }
     }
 
-    // Rule-level minimum-spend gate (e.g. MB JCB Platinum's 2tr Shopee threshold).
-    if (!pending && rule && rule.minSpend > 0) {
+    // Rule-level minimum (e.g. MB JCB Platinum's Shopee threshold) — same treatment.
+    if (!belowMin && rule && rule.minSpend > 0) {
       const used = ruleSpendUsage(card, rule, dateStr);
       if (used + amount < rule.minSpend) {
-        pending = true;
+        belowMin = true;
         shortfall = rule.minSpend - (used + amount);
         gateKind = "rule";
-        cashback = 0;
       }
     }
 
-    return { cashback, potential, rate, rule, capped, remaining, baseRate: base, txnLimited, pending, shortfall, cardRemaining, gateKind };
+    return { cashback, potential, rate, rule, capped, remaining, baseRate: base, txnLimited, belowMin, shortfall, cardRemaining, gateKind };
   }
 
   function cardTotals(cardId) {
@@ -1312,17 +1312,88 @@
       : days === 0 ? "Expected today"
       : days > 0 ? "Expected " + dateLabel(p.expectedStr) + " · in " + days + " day" + (days === 1 ? "" : "s")
       : "Expected " + dateLabel(p.expectedStr) + " · " + Math.abs(days) + " day" + (Math.abs(days) === 1 ? "" : "s") + " late";
-    return '<div class="trk ' + cls + '">' +
+    const adj = p.receivedAmount != null && Math.abs(p.receivedAmount - p.amount) > 0.5;
+    return '<div class="trk ' + cls + '" data-action="edit-payout" data-key="' + esc(p.key) + '">' +
       '<button class="trk-tick ' + (p.received ? "on" : "") + '" data-action="toggle-payout" data-key="' + esc(p.key) + '" aria-label="Mark received">' +
         (p.received ? "✓" : "") +
       '</button>' +
       '<div class="trk-body">' +
         '<div class="trk-t1">' + esc(p.card.name) + ' · ' +
           (p.card.statementDay ? cycleLabel(p.card, p.monthKey) : monthLabel(p.monthKey)) + '</div>' +
-        '<div class="trk-t2">' + when + '</div>' +
+        '<div class="trk-t2">' + when +
+          (adj ? ' · adjusted from ' + money(p.amount) : "") + '</div>' +
       '</div>' +
-      '<div class="trk-amt num">' + money(p.receivedAmount != null ? p.receivedAmount : p.amount) + '</div>' +
+      '<div class="trk-amt num">' + money(p.receivedAmount != null ? p.receivedAmount : p.amount) +
+        (adj ? '<span class="trk-adj">edited</span>' : "") + '</div>' +
     '</div>';
+  }
+
+  /* Lets you replace the calculated figure with what the bank actually paid,
+     or add an extra adjustment on top of it. */
+  function openPayoutSheet(key) {
+    const row = buildPayouts().find((p) => p.key === key);
+    if (!row) return;
+    const current = row.receivedAmount != null ? row.receivedAmount : row.amount;
+    openSheet(
+      '<h2>Cash Back Payout</h2>' +
+      '<div class="sheet-sub">' + esc(row.card.name) + ' · ' +
+        (row.card.statementDay ? cycleLabel(row.card, row.monthKey) : monthLabel(row.monthKey)) + '</div>' +
+      '<div class="stat-2" style="margin-bottom:14px;">' +
+        '<div class="stat"><div class="k">Calculated</div><div class="v num">' + money(row.amount) + '</div></div>' +
+        '<div class="stat"><div class="k">Expected</div><div class="v num" style="font-size:16px;">' + dateLabel(row.expectedStr) + '</div></div>' +
+      '</div>' +
+      '<div class="field"><label>Amount actually paid</label>' +
+        '<div class="amount-input"><input id="po_amount" type="text" inputmode="numeric" value="' + formatVnd(Math.round(current)) + '" /><span class="cur">₫</span></div>' +
+      '</div>' +
+      '<div class="field"><label>Add / subtract an adjustment</label>' +
+        '<div class="amount-input"><input id="po_adj" type="text" inputmode="numeric" placeholder="0" /><span class="cur">₫</span></div>' +
+      '</div>' +
+      '<div class="hint" style="margin:-6px 0 14px;">Type a number and tap Add to bump the amount above, or edit the amount directly. Prefix with a minus to subtract.</div>' +
+      '<div class="inline-actions" style="margin-bottom:12px;">' +
+        '<button class="btn btn-secondary" id="po_add">Add to amount</button>' +
+      '</div>' +
+      '<div class="field"><label>Received on</label>' +
+        '<input id="po_date" type="date" value="' + (row.receivedDate || todayStr()) + '" />' +
+      '</div>' +
+      '<button class="btn btn-primary" id="po_save">' + (row.received ? "Save" : "Mark received") + '</button>' +
+      (row.received ? '<button class="btn btn-secondary" id="po_unmark">Mark as not received</button>' : "") +
+      (row.receivedAmount != null ? '<button class="btn btn-ghost" id="po_reset">Reset to calculated amount</button>' : "") +
+      '<button class="btn btn-ghost" data-action="close-sheet">Cancel</button>'
+    );
+    const amtEl = document.getElementById("po_amount");
+    const adjEl = document.getElementById("po_adj");
+    wireMoneyInput(amtEl);
+    // Allow a leading minus so an adjustment can subtract.
+    adjEl.addEventListener("input", () => {
+      const neg = adjEl.value.trim().startsWith("-");
+      const v = formatVnd(adjEl.value);
+      adjEl.value = v ? (neg ? "-" + v : v) : (neg ? "-" : "");
+    });
+    document.getElementById("po_add").addEventListener("click", () => {
+      const neg = adjEl.value.trim().startsWith("-");
+      const delta = parseVnd(adjEl.value) * (neg ? -1 : 1);
+      if (!delta) { toast("Enter an adjustment first"); return; }
+      amtEl.value = formatVnd(Math.max(0, parseVnd(amtEl.value) + delta));
+      adjEl.value = "";
+      toast(delta > 0 ? "Added " + money(delta) : "Subtracted " + money(-delta));
+    });
+    document.getElementById("po_save").addEventListener("click", () => {
+      state.payouts[key] = {
+        date: document.getElementById("po_date").value || todayStr(),
+        amount: parseVnd(amtEl.value)
+      };
+      save(); closeSheet(); toast("Payout saved"); renderTrack();
+    });
+    const un = document.getElementById("po_unmark");
+    if (un) un.addEventListener("click", () => {
+      delete state.payouts[key];
+      save(); closeSheet(); toast("Marked as not received"); renderTrack();
+    });
+    const rst = document.getElementById("po_reset");
+    if (rst) rst.addEventListener("click", () => {
+      amtEl.value = formatVnd(Math.round(row.amount));
+      toast("Reset to " + money(row.amount));
+    });
   }
 
   function refundRow(r) {
@@ -1626,7 +1697,8 @@
       '<div class="seg">' +
         '<button class="seg-btn ' + (statsView === "pie" ? "on" : "") + '" data-action="stats-view" data-v="pie">Pie</button>' +
         '<button class="seg-btn ' + (statsView === "bars" ? "on" : "") + '" data-action="stats-view" data-v="bars">Bars</button>' +
-      '</div>';
+      '</div>' +
+      '<button class="btn btn-secondary" data-action="open-report" style="margin-bottom:13px;">Export Monthly Report</button>';
 
     if (!txns.length) {
       view.innerHTML = controls + '<div class="empty"><div class="ico">📊</div>Nothing logged in ' + esc(label) + '.</div>';
@@ -1780,15 +1852,9 @@
       const pv = document.getElementById("pv");
       if (!card || amt <= 0) { pv.innerHTML = ""; return; }
       const q = quote(card, draft.mcc, amt, draft.date);
-      const cls = q.pending ? "capped" : q.capped ? "capped" : q.rule ? "" : "base";
+      const cls = q.capped ? "capped" : q.rule ? "" : "base";
       let note;
-      if (q.pending && q.gateKind === "rule") {
-        note = `<b>${esc(ruleLabel(q.rule))}</b> needs ${money(q.rule.minSpend)} spent on this category per cycle before its ${q.rate}% pays out. ` +
-          `<b>${money(q.shortfall)}</b> more to go — this purchase would then be worth ${money(q.potential)}.`;
-      } else if (q.pending) {
-        note = `This card needs ${money(card.cardCap.minSpend)} of spending per cycle before any cash back pays out. ` +
-          `<b>${money(q.shortfall)}</b> more to go — this purchase would then be worth ${money(q.potential)}.`;
-      } else if (!q.rule) {
+      if (!q.rule) {
         note = q.rate > 0
           ? `No cash back category on this card matches — earning the ${q.rate}% base rate.`
           : `This card pays no cash back on this category.`;
@@ -1803,12 +1869,20 @@
         note = `Matched <b>${esc(ruleLabel(q.rule))}</b> at ${q.rate}%.` +
           (q.remaining != null ? ` ${money(Math.max(0, q.remaining - (q.rule.cap.type === "spend" ? amt : q.cashback)))} of cap left this ${unit}.` : "");
       }
+      // The minimum-spend shortfall rides along as a separate warning line rather
+      // than replacing the earned figure.
+      const minNote = q.belowMin
+        ? `<div class="pv-warn">Cycle is ${money(q.shortfall)} short of the ` +
+          `${money(q.gateKind === "rule" ? q.rule.minSpend : card.cardCap.minSpend)} minimum ` +
+          `${q.gateKind === "rule" ? "on this category" : "on this card"} — the bank may hold payout until it's met.</div>`
+        : "";
       pv.innerHTML = `<div class="preview ${cls}">
         <div class="pv-top">
           <span class="pv-amt num">${money(q.cashback)}</span>
-          <span class="pv-rate">${q.pending ? "pending" : q.rate + "%" + (q.capped ? " (capped)" : "")}</span>
+          <span class="pv-rate">${q.rate}%${q.capped ? " (capped)" : ""}</span>
         </div>
         <div class="pv-note">${note}</div>
+        ${minNote}
       </div>`;
     }
 
@@ -2593,7 +2667,7 @@
       } else {
         const card = getCard(t.cardId);
         const info = mccInfo(t.mcc);
-        const badge = t._pending ? '<span class="tag pend">PENDING</span>' : t._capped ? '<span class="tag cap">CAP</span>' : "";
+        const badge = t._capped ? '<span class="tag cap">CAP</span>' : t._belowMin ? '<span class="tag pend">MIN</span>' : "";
         html += '<div class="row txn" data-action="open-txn" data-id="' + t.id + '">' +
           '<div class="glyph">' + info.icon + '</div>' +
           '<div class="body">' +
@@ -2601,8 +2675,7 @@
             '<div class="t2">' + (card ? esc(card.name) : "Deleted card") + ' <span class="tag mcc">' + esc(t.mcc) + '</span></div>' +
           '</div>' +
           '<div class="tail"><div class="a1 num">' + money(t.amount) + '</div>' +
-          '<div class="a2 num"' + (t._pending ? ' style="color:var(--amber)"' : "") + '>' +
-            (t._pending ? "min spend not met" : "+" + money(t._cb) + " · " + t._rate + "%") +
+          '<div class="a2 num">' + "+" + money(t._cb) + " · " + t._rate + "%" +
           '</div></div>' +
         '</div>';
       }
@@ -2791,6 +2864,263 @@
       });
     }
     paint();
+  }
+
+  // ================= MONTHLY REPORT EXPORT =================
+  /* Drawn straight onto a canvas so it needs no external library and works
+     offline. Canvas -> PNG -> share sheet, which is the reliable route on iOS. */
+  let reportMonth = null;      // YYYY-MM
+  let reportThreshold = 1000000;
+
+  function reportMonths() {
+    const set = {};
+    for (const t of state.transactions) set[t.date.slice(0, 7)] = true;
+    const keys = Object.keys(set).sort().reverse();
+    if (!keys.length) keys.push(todayStr().slice(0, 7));
+    return keys;
+  }
+
+  function buildReport(monthKey, threshold) {
+    const txns = state.transactions.filter((t) => t.date.slice(0, 7) === monthKey);
+    const spend = txns.reduce((s, t) => s + t.amount, 0);
+    const cb = txns.reduce((s, t) => s + t._cb, 0);
+    const cash = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
+
+    const byGroup = {};
+    for (const t of txns) {
+      const g = txnGroup(t);
+      const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
+      e.value += t.amount; e.cb += t._cb; e.n++;
+    }
+    const cats = Object.keys(byGroup)
+      .map((g) => Object.assign({ key: g, name: groupName(g) }, byGroup[g]))
+      .sort((a, b) => b.value - a.value);
+
+    const big = txns.filter((t) => t.amount >= threshold)
+      .sort((a, b) => b.amount - a.amount);
+
+    return { monthKey, txns, spend, cb, cash, card: spend - cash, cats, big, threshold };
+  }
+
+  function drawReport(rep) {
+    const W = 1080;
+    const S = 2;                       // supersample for a crisp export
+    // Row heights must clear: title baseline, bar, and the sub-line beneath it.
+    const rowH = 78, catH = 104;
+    const headH = 300;
+    const catsH = 70 + rep.cats.length * catH;
+    const bigH = 70 + Math.max(1, rep.big.length) * rowH + 24;
+    const H = headH + catsH + bigH + 90;
+
+    const cv = document.createElement("canvas");
+    cv.width = W * S; cv.height = H * S;
+    const x = cv.getContext("2d");
+    x.scale(S, S);
+
+    const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+    const t1 = "#f4f6fb", t2 = "#a3adc2", t3 = "#6b7488", gold = "#d9b779", mint = "#4fd1a5";
+
+    // background
+    const bg = x.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, "#0d1119"); bg.addColorStop(1, "#07090f");
+    x.fillStyle = bg; x.fillRect(0, 0, W, H);
+    const glow = x.createRadialGradient(150, 0, 0, 150, 0, 700);
+    glow.addColorStop(0, "rgba(217,183,121,0.13)"); glow.addColorStop(1, "rgba(217,183,121,0)");
+    x.fillStyle = glow; x.fillRect(0, 0, W, 420);
+
+    const M = 60;
+    let y = 0;
+
+    // header
+    x.fillStyle = t3; x.font = "600 22px " + FONT;
+    x.fillText("SPENDING REPORT", M, 78);
+    x.fillStyle = t1; x.font = "700 52px " + FONT;
+    x.fillText(monthLabel(rep.monthKey), M, 136);
+
+    // headline stats
+    y = 190;
+    const stat = (label, val, color, cx) => {
+      x.fillStyle = t3; x.font = "600 19px " + FONT;
+      x.fillText(label, cx, y);
+      x.fillStyle = color; x.font = "700 38px " + FONT;
+      x.fillText(val, cx, y + 46);
+    };
+    stat("TOTAL SPENT", money(rep.spend), t1, M);
+    stat("CASH BACK", money(rep.cb), mint, M + 380);
+    stat("PURCHASES", String(rep.txns.length), t1, M + 760);
+
+    y = 300;
+    x.strokeStyle = "rgba(255,255,255,0.10)"; x.lineWidth = 1;
+    x.beginPath(); x.moveTo(M, y); x.lineTo(W - M, y); x.stroke();
+
+    // category breakdown
+    y += 52;
+    x.fillStyle = t3; x.font = "600 21px " + FONT;
+    x.fillText("WHERE THE MONEY WENT", M, y);
+    y += 34;
+
+    const maxCat = rep.cats.length ? rep.cats[0].value : 1;
+    const barW = W - M * 2;
+    for (let i = 0; i < rep.cats.length; i++) {
+      const c = rep.cats[i];
+      const pct = rep.spend > 0 ? (c.value / rep.spend) * 100 : 0;
+      x.fillStyle = t1; x.font = "650 26px " + FONT;
+      x.fillText(c.name, M, y + 26);
+      x.fillStyle = t1; x.font = "700 26px " + FONT;
+      x.textAlign = "right";
+      x.fillText(money(c.value), W - M, y + 26);
+      x.textAlign = "left";
+
+      // bar
+      const by = y + 46;
+      x.fillStyle = "rgba(255,255,255,0.07)";
+      roundRect(x, M, by, barW, 10, 5); x.fill();
+      const g2 = x.createLinearGradient(M, 0, M + barW, 0);
+      g2.addColorStop(0, gold); g2.addColorStop(1, "#e8cf9e");
+      x.fillStyle = g2;
+      roundRect(x, M, by, Math.max(6, (c.value / maxCat) * barW), 10, 5); x.fill();
+
+      x.fillStyle = t3; x.font = "500 20px " + FONT;
+      x.fillText(pct.toFixed(1).replace(".", ",") + "%  ·  " + c.n + (c.n === 1 ? " purchase" : " purchases"), M, by + 38);
+      if (c.cb > 0) {
+        x.fillStyle = mint; x.textAlign = "right";
+        x.fillText(money(c.cb) + " back", W - M, by + 38);
+        x.textAlign = "left";
+      }
+      y += catH;
+    }
+
+    // large transactions
+    y += 18;
+    x.strokeStyle = "rgba(255,255,255,0.10)";
+    x.beginPath(); x.moveTo(M, y); x.lineTo(W - M, y); x.stroke();
+    y += 50;
+    x.fillStyle = t3; x.font = "600 21px " + FONT;
+    x.fillText("LARGE PURCHASES  ·  OVER " + money(rep.threshold).toUpperCase(), M, y);
+    y += 40;
+
+    if (!rep.big.length) {
+      x.fillStyle = t3; x.font = "500 24px " + FONT;
+      x.fillText("Nothing above this amount.", M, y + 26);
+    } else {
+      for (const t of rep.big) {
+        const card = t.cardId ? getCard(t.cardId) : null;
+        x.fillStyle = t1; x.font = "620 26px " + FONT;
+        const label = t.note || txnLabel(t);
+        x.fillText(clip(x, label, 620), M, y + 24);
+        x.fillStyle = t3; x.font = "500 20px " + FONT;
+        const src = isCash(t) ? "Cash" : (card ? card.name : "Card");
+        x.fillText(dateLabel(t.date) + "  ·  " + src, M, y + 54);
+        x.fillStyle = t1; x.font = "700 27px " + FONT;
+        x.textAlign = "right";
+        x.fillText(money(t.amount), W - M, y + 24);
+        if (t._cb > 0) {
+          x.fillStyle = mint; x.font = "600 20px " + FONT;
+          x.fillText("+" + money(t._cb), W - M, y + 54);
+        }
+        x.textAlign = "left";
+        y += rowH;
+      }
+    }
+
+    // footer
+    x.fillStyle = t3; x.font = "500 18px " + FONT;
+    x.fillText("Card " + money(rep.card) + "   ·   Cash " + money(rep.cash) +
+               "   ·   Generated " + todayStr(), M, H - 40);
+
+    return cv;
+  }
+
+  function roundRect(x, rx, ry, w, h, r) {
+    x.beginPath();
+    x.moveTo(rx + r, ry);
+    x.arcTo(rx + w, ry, rx + w, ry + h, r);
+    x.arcTo(rx + w, ry + h, rx, ry + h, r);
+    x.arcTo(rx, ry + h, rx, ry, r);
+    x.arcTo(rx, ry, rx + w, ry, r);
+    x.closePath();
+  }
+  function clip(x, str, maxW) {
+    if (x.measureText(str).width <= maxW) return str;
+    let s2 = str;
+    while (s2.length > 1 && x.measureText(s2 + "…").width > maxW) s2 = s2.slice(0, -1);
+    return s2 + "…";
+  }
+
+  function openReportSheet() {
+    const months = reportMonths();
+    if (!reportMonth || months.indexOf(reportMonth) === -1) reportMonth = months[0];
+    openSheet(
+      '<h2>Export Report</h2>' +
+      '<div class="sheet-sub">A shareable image of one month\u2019s spending.</div>' +
+      '<div class="field"><label>Month</label><select id="rp_month">' +
+        months.map((m) => '<option value="' + m + '" ' + (m === reportMonth ? "selected" : "") + '>' + monthLabel(m) + '</option>').join("") +
+      '</select></div>' +
+      '<div class="field"><label>List purchases above</label>' +
+        '<div class="amount-input"><input id="rp_thresh" type="text" inputmode="numeric" value="' + formatVnd(reportThreshold) + '" /><span class="cur">₫</span></div>' +
+      '</div>' +
+      '<div class="hint" style="margin:-6px 0 14px;">Anything at or above this amount is listed individually in the report.</div>' +
+      '<div id="rp_preview" class="rp-preview"></div>' +
+      '<button class="btn btn-primary" id="rp_share">Save / Share Image</button>' +
+      '<button class="btn btn-secondary" id="rp_print">Print / Save as PDF</button>' +
+      '<button class="btn btn-ghost" data-action="close-sheet">Close</button>'
+    );
+    const threshEl = document.getElementById("rp_thresh");
+    wireMoneyInput(threshEl);
+
+    function refresh() {
+      reportMonth = document.getElementById("rp_month").value;
+      reportThreshold = parseVnd(threshEl.value);
+      const rep = buildReport(reportMonth, reportThreshold);
+      const cv = drawReport(rep);
+      const box = document.getElementById("rp_preview");
+      box.innerHTML = "";
+      cv.style.width = "100%";
+      cv.style.height = "auto";
+      cv.style.borderRadius = "12px";
+      box.appendChild(cv);
+      return rep;
+    }
+    document.getElementById("rp_month").addEventListener("change", refresh);
+    threshEl.addEventListener("input", refresh);
+    refresh();
+
+    document.getElementById("rp_share").addEventListener("click", async () => {
+      const rep = buildReport(reportMonth, reportThreshold);
+      const cv = drawReport(rep);
+      const name = "spending-" + reportMonth + ".png";
+      cv.toBlob(async (blob) => {
+        if (!blob) { toast("Couldn't build the image"); return; }
+        try {
+          const file = new File([blob], name, { type: "image/png" });
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file], title: "Spending " + monthLabel(reportMonth) });
+            return;
+          }
+        } catch (e) {
+          if (e && e.name === "AbortError") return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        toast("Image saved");
+      }, "image/png");
+    });
+
+    document.getElementById("rp_print").addEventListener("click", () => {
+      const rep = buildReport(reportMonth, reportThreshold);
+      const cv = drawReport(rep);
+      const w = window.open("", "_blank");
+      if (!w) { toast("Allow pop-ups to print"); return; }
+      w.document.write(
+        '<!doctype html><title>Spending ' + monthLabel(reportMonth) + '</title>' +
+        '<style>@page{margin:12mm}body{margin:0}img{width:100%}</style>' +
+        '<img src="' + cv.toDataURL("image/png") + '" onload="window.focus();window.print()">'
+      );
+      w.document.close();
+    });
   }
 
   // ================= MORE / SETTINGS =================
@@ -3084,6 +3414,10 @@
       if (state.payouts[k]) delete state.payouts[k];
       else state.payouts[k] = { date: todayStr() };
       save(); renderTrack();
+    } else if (a === "open-report") {
+      openReportSheet();
+    } else if (a === "edit-payout") {
+      openPayoutSheet(el.dataset.key);
     } else if (a === "add-sub") {
       openSubSheet(null);
     } else if (a === "edit-sub") {
