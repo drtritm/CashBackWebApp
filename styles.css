@@ -679,6 +679,8 @@ body::before {
 .cl-sp { font-size: 11px; color: var(--text-3); margin-top: 3px; }
 .row.txn { margin-bottom: 7px; }
 .tag.cash { color: var(--text-2); background: var(--surface-2); }
+.tag.wal { color: #c9a3e8; background: rgba(153,78,201,0.18); }
+.tag.top { color: var(--gold); background: var(--gold-soft); }
 
 .cash-grid { grid-template-columns: 1fr 1fr; }
 
@@ -693,6 +695,28 @@ body::before {
   border: 1px solid var(--hairline-soft); background: #07090f;
 }
 .rp-preview canvas { display: block; }
+
+/* ---------- e-wallet header ---------- */
+.wal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 15px 17px; margin-bottom: 13px;
+  background: linear-gradient(140deg, rgba(153,78,201,0.16), rgba(255,255,255,0.04));
+  border: 1px solid rgba(153,78,201,0.26); border-radius: 18px;
+}
+.wal-pick { position: relative; min-width: 0; flex: 1; }
+.wal-pick select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: none; padding: 0; }
+.wh-name {
+  font-size: 17px; font-weight: 700; letter-spacing: -0.015em; padding-right: 18px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3adc2' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right center / 15px;
+}
+.wh-bal { text-align: right; flex-shrink: 0; }
+.wh-k {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.11em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.wh-v { font-size: 20px; font-weight: 740; margin-top: 4px; color: var(--mint); }
+.wh-bal.neg .wh-v { color: var(--rose); }
 
 /* ---------- track tab (payouts, subs, fees, refunds) ---------- */
 .trk {

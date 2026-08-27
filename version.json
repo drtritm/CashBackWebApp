@@ -1,5 +1,5 @@
 {
-  "version": "1.16.0",
+  "version": "1.18.0",
   "released": "2026-08-16",
-  "notes": "Activity gets a proper date filter: All, Today, 7 days, 30 days, a month browser, or a custom from-to range, with a running total for whatever range is selected."
+  "notes": "E-wallets: load money from a card so the top-up earns that card’s cash back, then log what you spend from the wallet — counted once, categorised properly. Plus a Vietnamese language option in Settings."
 }

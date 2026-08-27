@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.16.0";
+  const APP_VERSION = "1.18.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -68,17 +68,48 @@
     { id: "other", name: "Other", icon: "•", group: "other" }
   ];
   const cashCat = (id) => CASH_CATEGORIES.find((c) => c.id === id) || CASH_CATEGORIES[CASH_CATEGORIES.length - 1];
-  const isCash = (t) => t.type === "cash";
+  /* Translation lookup. Keyed on the English source string so a missing entry
+     simply renders English instead of breaking. */
+  function tr(str) {
+    const dict = LOCALES[state.settings && state.settings.lang] || null;
+    return (dict && dict[str]) || str;
+  }
+  const isCash = (t2) => t2.type === "cash";
+  /* A top-up moves money card -> wallet. It is charged to the card (so it earns
+     cash back and lands on the statement) but it is NOT consumption — the real
+     spend happens later when the wallet is used. Counting both would double it. */
+  const isTopup = (t2) => t2.type === "topup";
+  const isWalletSpend = (t2) => t2.type === "wallet";
+  /* What belongs in "how much did I spend" analysis. */
+  const countsAsSpend = (t2) => !isTopup(t2);
+  /* What the bank actually bills to a card. */
+  const onCardStatement = (t2) => !isCash(t2) && !isWalletSpend(t2) && !!t2.cardId;
+
+  const getWallet = (id) => (state.wallets || []).find((w) => w.id === id);
+
+  /* Wallet balance = everything topped up minus everything spent from it. */
+  function walletBalance(walletId) {
+    let bal = 0;
+    for (const t of state.transactions) {
+      if (t.walletId !== walletId) continue;
+      if (isTopup(t)) bal += t.amount;
+      else if (isWalletSpend(t)) bal -= t.amount;
+    }
+    return bal;
+  }
 
   /* Unified category for any transaction, so cash and card share buckets in stats. */
-  function txnGroup(t) {
-    return isCash(t) ? cashCat(t.cashCat).group : mccInfo(t.mcc).groupId;
+  function txnGroup(tx) {
+    if (isCash(tx) || isWalletSpend(tx)) return cashCat(tx.cashCat).group;
+    return mccInfo(tx.mcc).groupId;
   }
-  function txnLabel(t) {
-    return isCash(t) ? cashCat(t.cashCat).name : mccInfo(t.mcc).name;
+  function txnLabel(tx) {
+    if (isCash(tx) || isWalletSpend(tx)) return tr(cashCat(tx.cashCat).name);
+    return mccInfo(tx.mcc).name;
   }
-  function txnIcon(t) {
-    return isCash(t) ? cashCat(t.cashCat).icon : mccInfo(t.mcc).icon;
+  function txnIcon(tx) {
+    if (isCash(tx) || isWalletSpend(tx)) return cashCat(tx.cashCat).icon;
+    return mccInfo(tx.mcc).icon;
   }
 
   /* Categorical palette for the pie slices. Validated for dark surface #12161f
@@ -117,7 +148,7 @@
   // ---------------- state ----------------
   function blank() {
     return {
-      cards: [], transactions: [],
+      cards: [], transactions: [], wallets: [],
       /* payouts: cash back the bank still owes you. Keyed "cardId|YYYY-MM" and
          only written once you tick it as received — the pending list itself is
          derived from transactions, so it can never drift out of sync. */
@@ -130,7 +161,7 @@
       subscriptions: [],
       refunds: [],
       settings: {
-        recentMccs: [], notify: false, notifyDays: 3, autoBackup: true,
+        recentMccs: [], notify: false, notifyDays: 3, autoBackup: true, lang: "en",
         lastSnapshotDate: null, lastSavedDate: null,
         defaultCashbackDelay: 45
       }
@@ -177,6 +208,7 @@
         const d = JSON.parse(raw);
         const s = blank();
         if (Array.isArray(d.cards)) s.cards = d.cards;
+        if (Array.isArray(d.wallets)) s.wallets = d.wallets;
         if (Array.isArray(d.transactions)) s.transactions = d.transactions;
         // Added in 1.9 — older saves simply won't have them.
         if (d.payouts && typeof d.payouts === "object") s.payouts = d.payouts;
@@ -626,7 +658,8 @@
         const range = cycleRange(card, k);
         const closed = isoDate(range.end) < today;
         const tx = state.transactions.filter((t) =>
-          !isCash(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
+          onCardStatement(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
+        // Statement balance intentionally INCLUDES top-ups — the bank charged them.
         const balance = tx.reduce((sum, t) => sum + t.amount, 0);
         if (!closed && balance <= 0) continue;      // nothing to show yet
         if (closed && balance <= 0) continue;       // nothing was billed
@@ -706,7 +739,7 @@
     // matched category spend per rule/period before the main pass runs.
     const ruleSpendAcc = {};
     for (const t of state.transactions) {
-      if (isCash(t)) continue;
+      if (isCash(t) || isWalletSpend(t)) continue;
       const card = getCard(t.cardId);
       if (!card) continue;
       if (card.cardCap && card.cardCap.minSpend > 0) {
@@ -726,7 +759,8 @@
     );
     for (const t of sorted) {
       // Cash earns nothing — it is tracked for spending totals only.
-      if (isCash(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
+      // Wallet spends earned their cash back at top-up time, so they earn none here.
+      if (isCash(t) || isWalletSpend(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const card = getCard(t.cardId);
       if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const base = card.baseRate || 0;
@@ -923,9 +957,9 @@
     const m = txns.filter((t) => t.date.slice(0, 7) === mk);
     const out = {
       cashback: txns.reduce((s, t) => s + t._cb, 0),
-      spent: txns.reduce((s, t) => s + t.amount, 0),
+      spent: txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
       monthCashback: m.reduce((s, t) => s + t._cb, 0),
-      monthSpent: m.reduce((s, t) => s + t.amount, 0),
+      monthSpent: m.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
       count: txns.length,
       hasCycle: false
     };
@@ -940,11 +974,11 @@
       out.cycleKey = curKey;
       out.cycleLabel = cycleLabel(card, curKey);
       out.cycleCashback = cur.reduce((s, t) => s + t._cb, 0);
-      out.cycleSpent = cur.reduce((s, t) => s + t.amount, 0);
+      out.cycleSpent = cur.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
       out.prevCycleKey = prevKey;
       out.prevCycleLabel = cycleLabel(card, prevKey);
       out.prevCycleCashback = prev.reduce((s, t) => s + t._cb, 0);
-      out.prevCycleSpent = prev.reduce((s, t) => s + t.amount, 0);
+      out.prevCycleSpent = prev.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     }
     return out;
   }
@@ -1018,6 +1052,14 @@
     home: "Overview", log: "Add Spending",
     cards: "My Cards", history: "Activity", track: "Track", stats: "Statistics", more: "Settings"
   };
+  /* Re-label the static tab bar whenever the language changes. */
+  function applyTabLabels() {
+    const map = { home: "Overview", log: "Add", cards: "Cards", history: "Activity", track: "Track", stats: "Stats" };
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      const lab = b.querySelector(".tb-lab");
+      if (lab && map[b.dataset.tab]) lab.textContent = tr(map[b.dataset.tab]);
+    });
+  }
   let tab = "home";
   let histFilter = "all";
   // "all" shows the full timeline (unchanged default); a "YYYY-MM" key narrows
@@ -1195,13 +1237,14 @@
     });
   }
 
-  function go(t) {
+  function go(tabName) {
     // Leaving a screen exits its reorder mode so it doesn't linger next visit.
-    if (t !== "home") reorderHome = false;
-    if (t !== "cards") reorderCards = false;
-    tab = t;
-    titleEl.textContent = TITLES[t];
-    [...tabbar.children].forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
+    if (tabName !== "home") reorderHome = false;
+    if (tabName !== "cards") reorderCards = false;
+    tab = tabName;
+    titleEl.textContent = tr(TITLES[tabName]);
+    [...tabbar.children].forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
+    applyTabLabels();
     render();
   }
   tabbar.addEventListener("click", (e) => {
@@ -1227,11 +1270,11 @@
       return;
     }
     const total = state.transactions.reduce((s, t) => s + t._cb, 0);
-    const totalSpent = state.transactions.reduce((s, t) => s + t.amount, 0);
+    const totalSpent = state.transactions.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const mk = todayStr().slice(0, 7);
     const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
     const mCb = mTx.reduce((s, t) => s + t._cb, 0);
-    const mSp = mTx.reduce((s, t) => s + t.amount, 0);
+    const mSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const mCash = mTx.filter(isCash).reduce((s, t) => s + t.amount, 0);
     const mCard = mSp - mCash;
     // Effective rate only makes sense against spending that could earn anything.
@@ -1248,7 +1291,7 @@
     alerts.sort((a, b) => a.n - b.n);
 
     const alertsHtml = alerts.length
-      ? `<div class="section-title">Upcoming</div>` + alerts.map((a) => `
+      ? `<div class="section-title">${tr("Upcoming")}</div>` + alerts.map((a) => `
         <div class="alert ${a.n <= 1 ? "due-soon" : ""}" data-action="open-card" data-id="${a.card.id}">
           <div class="ic">${ICON_DUE}</div>
           <div class="body">
@@ -1299,35 +1342,243 @@
       <div class="hero">
         <div class="hero-duo">
           <div>
-            <div class="label">Total cash back</div>
+            <div class="label">${tr("Total cash back")}</div>
             <div class="big num">${money(total)}</div>
           </div>
           <div class="hero-right">
-            <div class="label">Total spent</div>
+            <div class="label">${tr("Total spent")}</div>
             <div class="big alt num">${moneyShort(totalSpent)}</div>
           </div>
         </div>
         <div class="sub">
-          <div class="item"><div class="k">Month back</div><div class="v num">${money(mCb)}</div></div>
-          <div class="item"><div class="k">Month spend</div><div class="v num">${moneyShort(mSp)}</div></div>
-          <div class="item"><div class="k">Effective</div><div class="v num">${effective.toFixed(2).replace(".", ",")}%</div></div>
+          <div class="item"><div class="k">${tr("Month back")}</div><div class="v num">${money(mCb)}</div></div>
+          <div class="item"><div class="k">${tr("Month spend")}</div><div class="v num">${moneyShort(mSp)}</div></div>
+          <div class="item"><div class="k">${tr("Effective")}</div><div class="v num">${effective.toFixed(2).replace(".", ",")}%</div></div>
         </div>
       </div>
       <div class="stat-2" style="margin-bottom:13px;">
-        <div class="stat"><div class="k">Card spend · month</div><div class="v num">${money(mCard)}</div></div>
-        <div class="stat"><div class="k">Cash spend · month</div><div class="v num">${money(mCash)}</div></div>
+        <div class="stat"><div class="k">${tr("Card spend · month")}</div><div class="v num">${money(mCard)}</div></div>
+        <div class="stat"><div class="k">${tr("Cash spend · month")}</div><div class="v num">${money(mCash)}</div></div>
       </div>
       ${alertsHtml}
       <div class="section-title">Cards
         <span class="title-links">
           ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-home">${reorderHome ? "Done" : "Reorder"}</span>` : ""}
-          ${reorderHome ? "" : `<span class="link" data-action="goto-cards">See all ›</span>`}
+          ${reorderHome ? "" : `<span class="link" data-action="goto-cards">${tr("See all ›")}</span>`}
         </span>
       </div>
       ${reorderHome ? `<div class="hint" style="margin:-2px 4px 10px;">Press and drag a handle to move a card.</div>` : ""}
       <div class="reorder-list" id="homeCardsList">${cardsHtml}</div>
     `;
     if (reorderHome) wireDragReorder(document.getElementById("homeCardsList"), reorderCardTo);
+  }
+
+  // ================= E-WALLETS =================
+  /* A wallet is funded from a credit card (the top-up earns the card's cash back)
+     and then spent at merchants. Keeping the two events separate is what lets the
+     app credit cash back once, at top-up, while still categorising the real spend. */
+  const walletDraft = { walletId: null, mode: "spend", cat: null, amount: "", date: null, note: "", cardId: null };
+
+  function renderWalletForm() {
+    if (!state.wallets.length) {
+      view.innerHTML =
+        '<div class="empty"><div class="ico">\ud83d\udc5b</div>' + tr("No e-wallet yet.") + '<br>' +
+        tr("Add one to track money you load from a card and spend later.") + '</div>' +
+        '<button class="btn btn-primary" data-action="add-wallet">' + tr("Add E-Wallet") + '</button>';
+      return;
+    }
+    if (!walletDraft.walletId || !getWallet(walletDraft.walletId)) walletDraft.walletId = state.wallets[0].id;
+    if (!walletDraft.date) walletDraft.date = todayStr();
+    const w = getWallet(walletDraft.walletId);
+    if (!walletDraft.cardId || !getCard(walletDraft.cardId)) {
+      walletDraft.cardId = w.cardId && getCard(w.cardId) ? w.cardId : (state.cards[0] ? state.cards[0].id : null);
+    }
+    if (!walletDraft.cat) walletDraft.cat = w.defaultCat || "transport";
+    const bal = walletBalance(w.id);
+    const topping = walletDraft.mode === "topup";
+
+    const cats = CASH_CATEGORIES.map((c) =>
+      '<button type="button" class="cat-tile ' + (c.id === walletDraft.cat ? "sel" : "") + '" data-pickwcat="' + c.id + '">' +
+        '<span class="ci">' + c.icon + '</span><span class="cn">' + esc(tr(c.name)) + '</span>' +
+      '</button>').join("");
+
+    const preview = (() => {
+      if (!topping) return "";
+      const card = getCard(walletDraft.cardId);
+      const amt = parseVnd(walletDraft.amount);
+      if (!card || amt <= 0) return "";
+      const q = quote(card, w.topupMcc || "4121", amt, walletDraft.date);
+      return '<div class="preview ' + (q.capped ? "capped" : q.rule ? "" : "base") + '">' +
+        '<div class="pv-top"><span class="pv-amt num">' + money(q.cashback) + '</span>' +
+        '<span class="pv-rate">' + q.rate + '%</span></div>' +
+        '<div class="pv-note">' + tr("Top-up is charged to the card as MCC") + ' ' + esc(w.topupMcc || "4121") +
+        ' \u00b7 ' + esc(mccInfo(w.topupMcc || "4121").name) + '. ' +
+        tr("Cash back is earned here, not when you spend from the wallet.") + '</div></div>';
+    })();
+
+    view.innerHTML =
+      '<div class="wal-head">' +
+        '<div class="wal-pick">' +
+          '<select id="w_wallet">' +
+            state.wallets.map((x) => '<option value="' + x.id + '" ' + (x.id === w.id ? "selected" : "") + '>' + esc(x.name) + '</option>').join("") +
+          '</select>' +
+          '<div class="wh-name">' + esc(w.name) + '</div>' +
+        '</div>' +
+        '<div class="wh-bal ' + (bal < 0 ? "neg" : "") + '">' +
+          '<div class="wh-k">' + tr("Balance") + '</div>' +
+          '<div class="wh-v num">' + money(bal) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="seg" style="margin-bottom:13px;">' +
+        '<button class="seg-btn ' + (!topping ? "on" : "") + '" data-action="wallet-mode" data-v="spend">' + tr("Spend from wallet") + '</button>' +
+        '<button class="seg-btn ' + (topping ? "on" : "") + '" data-action="wallet-mode" data-v="topup">' + tr("Top up") + '</button>' +
+      '</div>' +
+      '<div class="panel">' +
+        '<div class="field"><label>' + tr("Amount") + '</label>' +
+          '<div class="amount-input"><input id="w_amount" type="text" inputmode="numeric" placeholder="0" value="' + esc(walletDraft.amount) + '" /><span class="cur">\u20ab</span></div>' +
+        '</div>' +
+        (topping
+          ? '<div class="field"><label>' + tr("Funded by card") + '</label><select id="w_card">' +
+              state.cards.map((c) => '<option value="' + c.id + '" ' + (c.id === walletDraft.cardId ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
+            '</select></div>'
+          : '<div class="field"><label>' + tr("Category") + '</label><div class="cat-grid cash-grid">' + cats + '</div></div>') +
+        '<div class="row-2">' +
+          '<div class="field"><label>' + tr("Date") + '</label><input id="w_date" type="date" value="' + walletDraft.date + '" /></div>' +
+          '<div class="field"><label>' + tr("Note") + '</label><input id="w_note" type="text" placeholder="' + tr("Optional") + '" value="' + esc(walletDraft.note) + '" /></div>' +
+        '</div>' +
+      '</div>' +
+      preview +
+      (!topping && bal <= 0
+        ? '<div class="hint" style="margin:-4px 4px 12px;">' + tr("This wallet has no balance. Top it up first, or log anyway to record the spend.") + '</div>'
+        : "") +
+      '<button class="btn btn-primary" id="w_save">' + (topping ? tr("Add Top-Up") : tr("Add Wallet Spending")) + '</button>' +
+      '<button class="btn btn-ghost" data-action="manage-wallets">' + tr("Manage e-wallets") + '</button>';
+
+    const amtEl = document.getElementById("w_amount");
+    const dateEl = document.getElementById("w_date");
+    const noteEl = document.getElementById("w_note");
+    wireMoneyInput(amtEl);
+    const stash = () => {
+      walletDraft.amount = amtEl.value;
+      walletDraft.note = noteEl.value;
+      walletDraft.date = dateEl.value || todayStr();
+      const cEl = document.getElementById("w_card");
+      if (cEl) walletDraft.cardId = cEl.value;
+    };
+    amtEl.addEventListener("input", () => { stash(); if (topping) renderLog(); });
+    document.getElementById("w_wallet").addEventListener("change", (e) => {
+      stash(); walletDraft.walletId = e.target.value; walletDraft.cardId = null; walletDraft.cat = null; renderLog();
+    });
+    const cardEl = document.getElementById("w_card");
+    if (cardEl) cardEl.addEventListener("change", () => { stash(); renderLog(); });
+    view.querySelectorAll("[data-pickwcat]").forEach((b) =>
+      b.addEventListener("click", () => { stash(); walletDraft.cat = b.dataset.pickwcat; renderLog(); }));
+
+    document.getElementById("w_save").addEventListener("click", () => {
+      stash();
+      const amt = parseVnd(amtEl.value);
+      if (!(amt > 0)) { toast(tr("Enter an amount first")); return; }
+      if (topping) {
+        const card = getCard(walletDraft.cardId);
+        if (!card) { toast(tr("Add a card first")); return; }
+        state.transactions.push({
+          id: uid(), type: "topup", cardId: card.id, walletId: w.id,
+          mcc: w.topupMcc || "4121", amount: amt,
+          date: walletDraft.date, note: walletDraft.note.trim() || tr("Wallet top-up")
+        });
+      } else {
+        state.transactions.push({
+          id: uid(), type: "wallet", cardId: null, walletId: w.id,
+          cashCat: walletDraft.cat, amount: amt,
+          date: walletDraft.date, note: walletDraft.note.trim()
+        });
+      }
+      save(); recompute(); runDailyBackup();
+      const last = state.transactions[state.transactions.length - 1];
+      toast(topping ? "+" + money(last._cb) + " " + tr("cash back") : money(amt) + " " + tr("logged"));
+      walletDraft.amount = ""; walletDraft.note = "";
+      renderLog();
+    });
+  }
+
+  function openWalletSheet(id) {
+    const existing = id ? getWallet(id) : null;
+    const d = existing || {
+      name: "", topupMcc: "4121", defaultCat: "transport",
+      cardId: state.cards[0] ? state.cards[0].id : null, gradient: "violet"
+    };
+    openSheet(
+      '<h2>' + (existing ? tr("Edit E-Wallet") : tr("New E-Wallet")) + '</h2>' +
+      '<div class="sheet-sub">' + tr("Money you load from a card and spend later, like a ride-hailing wallet.") + '</div>' +
+      '<div class="field"><label>' + tr("Name") + '</label><input id="wl_name" type="text" placeholder="Grab / Be / MoMo" value="' + esc(d.name) + '" /></div>' +
+      '<div class="field"><label>' + tr("Top-up is charged as") + '</label>' +
+        '<button class="picker-btn" id="wl_mcc" type="button">' +
+          '<span class="glyph">' + mccInfo(d.topupMcc).icon + '</span>' +
+          '<span class="body"><span class="t1">' + esc(mccInfo(d.topupMcc).name) + '</span>' +
+          '<span class="t2">MCC ' + esc(d.topupMcc) + '</span></span><span class="chev">\u203a</span>' +
+        '</button>' +
+      '</div>' +
+      '<div class="hint" style="margin:-6px 0 14px;">' + tr("The MCC your bank sees when you load the wallet — this decides the cash back rate.") + '</div>' +
+      '<div class="field"><label>' + tr("Usual funding card") + '</label><select id="wl_card">' +
+        '<option value="">' + tr("None") + '</option>' +
+        state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
+      '</select></div>' +
+      '<div class="field"><label>' + tr("Usual spending category") + '</label><select id="wl_cat">' +
+        CASH_CATEGORIES.map((c) => '<option value="' + c.id + '" ' + (d.defaultCat === c.id ? "selected" : "") + '>' + esc(tr(c.name)) + '</option>').join("") +
+      '</select></div>' +
+      '<div class="field"><label>' + tr("Colour") + '</label>' + swatchesHtml(d.gradient) + '</div>' +
+      '<button class="btn btn-primary" id="wl_save">' + (existing ? tr("Save") : tr("Add E-Wallet")) + '</button>' +
+      (existing ? '<button class="btn btn-danger" id="wl_del">' + tr("Delete") + '</button>' : "") +
+      '<button class="btn btn-ghost" data-action="close-sheet">' + tr("Cancel") + '</button>'
+    );
+    wireSwatches();
+    let pickedMcc = d.topupMcc;
+    document.getElementById("wl_mcc").addEventListener("click", () => {
+      openMccPicker((code) => { pickedMcc = code; d.topupMcc = code; openWalletSheet(id); },
+        { onCancel: () => openWalletSheet(id) });
+    });
+    document.getElementById("wl_save").addEventListener("click", () => {
+      const name = document.getElementById("wl_name").value.trim();
+      if (!name) { toast(tr("Give it a name")); return; }
+      const rec = {
+        id: existing ? existing.id : uid(),
+        name, topupMcc: pickedMcc,
+        cardId: document.getElementById("wl_card").value || null,
+        defaultCat: document.getElementById("wl_cat").value,
+        gradient: pickedGrad()
+      };
+      if (existing) Object.assign(existing, rec);
+      else state.wallets.push(rec);
+      save(); closeSheet(); toast(tr("Saved")); render();
+    });
+    const del = document.getElementById("wl_del");
+    if (del) del.addEventListener("click", () => {
+      const used = state.transactions.filter((x) => x.walletId === existing.id).length;
+      if (!confirm(used
+        ? tr("Delete this wallet? Its") + " " + used + " " + tr("entries stay in Activity but lose their wallet link.")
+        : tr("Delete this wallet?"))) return;
+      state.wallets = state.wallets.filter((x) => x.id !== existing.id);
+      save(); closeSheet(); toast(tr("Deleted")); render();
+    });
+  }
+
+  function openWalletManager() {
+    openSheet(
+      '<h2>' + tr("E-Wallets") + '</h2>' +
+      '<div class="sheet-sub">' + tr("Loaded from a card, spent at merchants.") + '</div>' +
+      (state.wallets.length
+        ? state.wallets.map((w) => {
+            const bal = walletBalance(w.id);
+            return '<div class="trk" data-action="edit-wallet" data-id="' + w.id + '">' +
+              '<div class="trk-swatch" style="background:' + gradCss(w.gradient) + '"></div>' +
+              '<div class="trk-body"><div class="trk-t1">' + esc(w.name) + '</div>' +
+              '<div class="trk-t2">MCC ' + esc(w.topupMcc) + ' \u00b7 ' + esc(mccInfo(w.topupMcc).name) + '</div></div>' +
+              '<div class="trk-amt num">' + money(bal) + '</div></div>';
+          }).join("")
+        : '<div class="empty" style="padding:24px 12px;">' + tr("No e-wallet yet.") + '</div>') +
+      '<button class="btn btn-primary" data-action="add-wallet">' + tr("Add E-Wallet") + '</button>' +
+      '<button class="btn btn-ghost" data-action="close-sheet">' + tr("Close") + '</button>'
+    );
   }
 
   // ================= TRACK: payouts, subscriptions, fees, refunds =================
@@ -1419,9 +1670,9 @@
   function renderTrack() {
     const seg =
       '<div class="seg">' +
-        '<button class="seg-btn ' + (trackView === "incoming" ? "on" : "") + '" data-action="track-view" data-v="incoming">Incoming</button>' +
-        '<button class="seg-btn ' + (trackView === "bills" ? "on" : "") + '" data-action="track-view" data-v="bills">Statements</button>' +
-        '<button class="seg-btn ' + (trackView === "recurring" ? "on" : "") + '" data-action="track-view" data-v="recurring">Recurring</button>' +
+        '<button class="seg-btn ' + (trackView === "incoming" ? "on" : "") + '" data-action="track-view" data-v="incoming">' + tr("Incoming") + '</button>' +
+        '<button class="seg-btn ' + (trackView === "bills" ? "on" : "") + '" data-action="track-view" data-v="bills">' + tr("Statements") + '</button>' +
+        '<button class="seg-btn ' + (trackView === "recurring" ? "on" : "") + '" data-action="track-view" data-v="recurring">' + tr("Recurring") + '</button>' +
       '</div>';
     view.innerHTML = seg +
       (trackView === "incoming" ? trackIncoming()
@@ -1442,11 +1693,11 @@
 
     let html =
       '<div class="stat-2" style="margin-bottom:6px;">' +
-        '<div class="stat"><div class="k">Cash back owed</div><div class="v mint num">' + money(owed) + '</div></div>' +
-        '<div class="stat"><div class="k">Refunds owed</div><div class="v num">' + money(refundOwed) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Cash back owed") + '</div><div class="v mint num">' + money(owed) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Refunds owed") + '</div><div class="v num">' + money(refundOwed) + '</div></div>' +
       '</div>';
 
-    html += '<div class="section-title">Cash Back Payouts</div>';
+    html += '<div class="section-title">' + tr("Cash Back Payouts") + '</div>';
     if (!pending.length && !done.length) {
       html += '<div class="empty" style="padding:26px 14px;">No cash back earned yet.<br>Log a card purchase and it will appear here.</div>';
     } else {
@@ -1598,21 +1849,21 @@
 
     let html =
       '<div class="stat-2" style="margin-bottom:6px;">' +
-        '<div class="stat"><div class="k">Unpaid statements</div><div class="v num">' + money(owed) + '</div></div>' +
-        '<div class="stat"><div class="k">Overdue</div><div class="v num"' +
+        '<div class="stat"><div class="k">' + tr("Unpaid statements") + '</div><div class="v num">' + money(owed) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Overdue") + '</div><div class="v num"' +
           (overdue ? ' style="color:var(--rose)"' : '') + '>' + overdue + '</div></div>' +
       '</div>';
 
     const current = rows.filter((r) => !r.closed);
     const paid = rows.filter((r) => r.closed && r.paid);
 
-    html += '<div class="section-title">To Pay</div>';
+    html += '<div class="section-title">' + tr("To Pay") + '</div>';
     html += open.length
       ? open.map(statementRow).join("")
       : '<div class="empty" style="padding:22px 14px;">Every closed statement is settled.</div>';
 
     if (current.length) {
-      html += '<div class="section-title">Still Open</div>' + current.map(statementRow).join("");
+      html += '<div class="section-title">' + tr("Still Open") + '</div>' + current.map(statementRow).join("");
     }
     if (paid.length) {
       html += '<div class="sub-head">Paid (' + paid.length + ')</div>' +
@@ -1671,8 +1922,8 @@
 
     let html =
       '<div class="stat-2" style="margin-bottom:6px;">' +
-        '<div class="stat"><div class="k">Subscriptions / month</div><div class="v num">' + money(perMonth) + '</div></div>' +
-        '<div class="stat"><div class="k">Annual fees / year</div><div class="v num">' + money(feeTotal) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Subscriptions / month") + '</div><div class="v num">' + money(perMonth) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Annual fees / year") + '</div><div class="v num">' + money(feeTotal) + '</div></div>' +
       '</div>' +
       '<div class="hint" style="margin:2px 4px 10px;">Subscriptions cost ' + money(perMonth * 12) + ' a year, plus ' + money(feeTotal) + ' in card fees.</div>';
 
@@ -1733,7 +1984,7 @@
     openSheet(
       '<h2>' + (existing ? "Edit Subscription" : "New Subscription") + '</h2>' +
       '<div class="field"><label>Service</label><input id="sb_name" type="text" placeholder="Netflix" value="' + esc(d.name) + '" /></div>' +
-      '<div class="field"><label>Amount</label>' +
+      '<div class="field"><label>' + tr("Amount") + '</label>' +
         '<div class="amount-input"><input id="sb_amount" type="text" inputmode="numeric" value="' + (d.amount ? formatVnd(d.amount) : "") + '" /><span class="cur">₫</span></div>' +
       '</div>' +
       '<div class="row-2">' +
@@ -1788,7 +2039,7 @@
       '<h2>' + (existing ? "Edit Refund" : "Track a Refund") + '</h2>' +
       '<div class="sheet-sub">For orders you cancelled. Tick it once the money is back.</div>' +
       '<div class="field"><label>Merchant / order</label><input id="rf_merchant" type="text" placeholder="Shopee order" value="' + esc(d.merchant) + '" /></div>' +
-      '<div class="field"><label>Amount</label>' +
+      '<div class="field"><label>' + tr("Amount") + '</label>' +
         '<div class="amount-input"><input id="rf_amount" type="text" inputmode="numeric" value="' + (d.amount ? formatVnd(d.amount) : "") + '" /><span class="cur">₫</span></div>' +
       '</div>' +
       '<div class="row-2">' +
@@ -1798,7 +2049,7 @@
           state.cards.map((c) => '<option value="' + c.id + '" ' + (d.cardId === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
         '</select></div>' +
       '</div>' +
-      '<div class="field"><label>Note</label><input id="rf_note" type="text" placeholder="Optional" value="' + esc(d.note || "") + '" /></div>' +
+      '<div class="field"><label>' + tr("Note") + '</label><input id="rf_note" type="text" placeholder="' + tr("Optional") + '" value="' + esc(d.note || "") + '" /></div>' +
       '<button class="btn btn-primary" id="rf_save">' + (existing ? "Save" : "Add") + '</button>' +
       (existing ? '<button class="btn btn-danger" id="rf_del">Delete</button>' : "") +
       '<button class="btn btn-ghost" data-action="close-sheet">Cancel</button>'
@@ -1929,22 +2180,22 @@
   function renderStats() {
     const win = statsWindow();
     const txns = win.txns, label = win.label;
-    const totalSpend = txns.reduce((s, t) => s + t.amount, 0);
+    const totalSpend = txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const totalCb = txns.reduce((s, t) => s + t._cb, 0);
     const cashSpend = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
     const cardSpend = totalSpend - cashSpend;
 
     const controls =
       '<div class="chips">' +
-        '<button class="chip ' + (statsRange === "month" ? "active" : "") + '" data-action="stats-range" data-v="month">This month</button>' +
-        '<button class="chip ' + (statsRange === "last" ? "active" : "") + '" data-action="stats-range" data-v="last">Last month</button>' +
-        '<button class="chip ' + (statsRange === "all" ? "active" : "") + '" data-action="stats-range" data-v="all">All time</button>' +
+        '<button class="chip ' + (statsRange === "month" ? "active" : "") + '" data-action="stats-range" data-v="month">' + tr("This month") + '</button>' +
+        '<button class="chip ' + (statsRange === "last" ? "active" : "") + '" data-action="stats-range" data-v="last">' + tr("Last month") + '</button>' +
+        '<button class="chip ' + (statsRange === "all" ? "active" : "") + '" data-action="stats-range" data-v="all">' + tr("All time") + '</button>' +
       '</div>' +
       '<div class="seg">' +
-        '<button class="seg-btn ' + (statsView === "pie" ? "on" : "") + '" data-action="stats-view" data-v="pie">Pie</button>' +
-        '<button class="seg-btn ' + (statsView === "bars" ? "on" : "") + '" data-action="stats-view" data-v="bars">Bars</button>' +
+        '<button class="seg-btn ' + (statsView === "pie" ? "on" : "") + '" data-action="stats-view" data-v="pie">' + tr("Pie") + '</button>' +
+        '<button class="seg-btn ' + (statsView === "bars" ? "on" : "") + '" data-action="stats-view" data-v="bars">' + tr("Bars") + '</button>' +
       '</div>' +
-      '<button class="btn btn-secondary" data-action="open-report" style="margin-bottom:13px;">Export Monthly Report</button>';
+      '<button class="btn btn-secondary" data-action="open-report" style="margin-bottom:13px;">' + tr("Export Monthly Report") + '</button>';
 
     if (!txns.length) {
       view.innerHTML = controls + '<div class="empty"><div class="ico">📊</div>Nothing logged in ' + esc(label) + '.</div>';
@@ -1954,9 +2205,11 @@
     // Category rows — cash and card unified into the same MCC groups.
     const byGroup = {};
     for (const t of txns) {
+      // Top-ups carry their cash back but no category — the wallet spend has it.
       const g = txnGroup(t);
       const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
-      e.value += t.amount; e.cb += t._cb; e.n++;
+      if (countsAsSpend(t)) { e.value += t.amount; e.n++; }
+      e.cb += t._cb;
     }
     const catRows = Object.keys(byGroup)
       .map((g) => Object.assign({ key: g, name: groupName(g), icon: groupIcon(g) }, byGroup[g]))
@@ -1968,8 +2221,8 @@
       const tx = txns.filter((t) => !isCash(t) && t.cardId === c.id);
       return {
         key: c.id, name: (c.issuer ? c.issuer + " " : "") + c.name, card: c,
-        value: tx.reduce((s, t) => s + t.amount, 0),
-        cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.length
+        value: tx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
+        cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.filter(countsAsSpend).length
       };
     }).filter((r) => r.value > 0);
     if (cashSpend > 0) {
@@ -1991,10 +2244,10 @@
     if (statsView === "pie") {
       const srcSlices = srcRows.map((r) => Object.assign({}, r, { color: srcColor(r) }));
       body =
-        '<div class="section-title">Spending by Category<span class="link num">' + money(totalSpend) + '</span></div>' +
+        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(totalSpend) + '</span></div>' +
         donut(catSlices, moneyShort(totalSpend), label) +
         '<div class="legend">' + legendRows(catSlices, totalSpend) + '</div>' +
-        '<div class="section-title">Where It Was Paid From</div>' +
+        '<div class="section-title">' + tr("Where It Was Paid From") + '</div>' +
         donut(srcSlices, moneyShort(totalSpend), "total spend") +
         '<div class="legend">' + legendRows(srcSlices, totalSpend) + '</div>';
     } else {
@@ -2004,20 +2257,20 @@
         ? '<div class="share-bar">' + srcRows.map((r) => '<i style="flex:' + r.value + ';background:' + srcColor(r) + '"></i>').join("") + '</div>'
         : "";
       body =
-        '<div class="section-title">Spending by Category<span class="link num">' + money(totalSpend) + '</span></div>' +
+        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(totalSpend) + '</span></div>' +
         barRows(catRows, totalSpend, maxCat, () => "linear-gradient(90deg, var(--gold), #e8cf9e)") +
-        '<div class="section-title">Where It Was Paid From</div>' + shareBar +
+        '<div class="section-title">' + tr("Where It Was Paid From") + '</div>' + shareBar +
         barRows(srcRows, totalSpend, maxSrc, srcColor);
     }
 
     view.innerHTML = controls +
       '<div class="stat-2" style="margin-bottom:6px;">' +
-        '<div class="stat"><div class="k">Total spent</div><div class="v num">' + money(totalSpend) + '</div></div>' +
-        '<div class="stat"><div class="k">Cash back</div><div class="v mint num">' + money(totalCb) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Total spent") + '</div><div class="v num">' + money(totalSpend) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("Cash back") + '</div><div class="v mint num">' + money(totalCb) + '</div></div>' +
       '</div>' +
       '<div class="stat-2" style="margin-bottom:6px;">' +
-        '<div class="stat"><div class="k">On cards</div><div class="v num">' + money(cardSpend) + '</div></div>' +
-        '<div class="stat"><div class="k">In cash</div><div class="v num">' + money(cashSpend) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("On cards") + '</div><div class="v num">' + money(cardSpend) + '</div></div>' +
+        '<div class="stat"><div class="k">' + tr("In cash") + '</div><div class="v num">' + money(cashSpend) + '</div></div>' +
       '</div>' +
       body;
   }
@@ -2027,15 +2280,18 @@
 
   /* One "Add" tab for both payment methods — a segmented control beats two
      near-identical tabs competing for space in the bar. */
-  let logMode = "card";   // card | cash
+  let logMode = "card";   // card | cash | wallet
 
   function renderLog() {
     const seg =
       '<div class="seg seg-lg">' +
-        '<button class="seg-btn ' + (logMode === "card" ? "on" : "") + '" data-action="log-mode" data-v="card">Card</button>' +
-        '<button class="seg-btn ' + (logMode === "cash" ? "on" : "") + '" data-action="log-mode" data-v="cash">Cash</button>' +
+        '<button class="seg-btn ' + (logMode === "card" ? "on" : "") + '" data-action="log-mode" data-v="card">' + tr("Card") + '</button>' +
+        '<button class="seg-btn ' + (logMode === "cash" ? "on" : "") + '" data-action="log-mode" data-v="cash">' + tr("Cash") + '</button>' +
+        '<button class="seg-btn ' + (logMode === "wallet" ? "on" : "") + '" data-action="log-mode" data-v="wallet">' + tr("Wallet") + '</button>' +
       '</div>';
-    if (logMode === "cash") renderCashForm(); else renderLogCard();
+    if (logMode === "cash") renderCashForm();
+    else if (logMode === "wallet") renderWalletForm();
+    else renderLogCard();
     view.insertAdjacentHTML("afterbegin", seg);
   }
 
@@ -2063,20 +2319,20 @@
     view.innerHTML = `
       <div class="panel">
         <div class="field">
-          <label>Amount</label>
+          <label>${tr("Amount")}</label>
           <div class="amount-input">
             <input id="f_amount" type="text" inputmode="numeric" placeholder="0" value="${esc(draft.amount)}" />
             <span class="cur">₫</span>
           </div>
         </div>
         <div class="field">
-          <label>Card</label>
+          <label>${tr("Card")}</label>
           <select id="f_card">
             ${state.cards.map((c) => `<option value="${c.id}" ${c.id === draft.cardId ? "selected" : ""}>${esc(cardFullName(c))}</option>`).join("")}
           </select>
         </div>
         <div class="field">
-          <label>Category</label>
+          <label>${tr("Category")}</label>
           <div class="cat-grid">
             ${cats.map((c) => `
               <button type="button" class="cat-tile ${c.mcc === draft.mcc ? "sel" : ""}" data-pickmcc="${esc(c.mcc)}">
@@ -2093,14 +2349,14 @@
           ${cats.length ? "" : `<div class="hint" style="margin-top:10px;">This card has no cash back categories yet. Open <b>Cards</b> → this card → <b>Add rule</b>.</div>`}
         </div>
         <div class="row-2">
-          <div class="field"><label>Date</label><input id="f_date" type="date" value="${draft.date}" /></div>
-          <div class="field"><label>Note</label><input id="f_note" type="text" placeholder="Optional" value="${esc(draft.note)}" /></div>
+          <div class="field"><label>${tr("Date")}</label><input id="f_date" type="date" value="${draft.date}" /></div>
+          <div class="field"><label>${tr("Note")}</label><input id="f_note" type="text" placeholder="${tr("Optional")}" value="${esc(draft.note)}" /></div>
         </div>
-        <button type="button" class="btn btn-ghost" id="mccPick" style="margin-top:2px;font-size:13px;">Pick an exact MCC instead ›</button>
+        <button type="button" class="btn btn-ghost" id="mccPick" style="margin-top:2px;font-size:13px;">${tr("Pick an exact MCC instead ›")}</button>
       </div>
       <div id="pv"></div>
-      <button class="btn btn-primary" id="saveTxn">Add Purchase</button>
-      <button class="btn btn-ghost" id="bestCard">Which card is best for this?</button>
+      <button class="btn btn-primary" id="saveTxn">${tr("Add Purchase")}</button>
+      <button class="btn btn-ghost" id="bestCard">${tr("Which card is best for this?")}</button>
     `;
 
     const amtEl = document.getElementById("f_amount");
@@ -2310,7 +2566,7 @@
     const mk = todayStr().slice(0, 7);
     const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
     const monthCb = mTx.reduce((s, t) => s + t._cb, 0);
-    const monthSp = mTx.reduce((s, t) => s + t.amount, 0);
+    const monthSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const lifetimeCb = state.transactions.reduce((s, t) => s + t._cb, 0);
 
     view.innerHTML = `
@@ -2318,16 +2574,16 @@
         <div class="label">All cards · ${monthLabel(mk)}</div>
         <div class="big num">${money(monthCb)}</div>
         <div class="sub">
-          <div class="item"><div class="k">Spent</div><div class="v num">${moneyShort(monthSp)}</div></div>
-          <div class="item"><div class="k">Purchases</div><div class="v num">${mTx.length}</div></div>
-          <div class="item"><div class="k">Lifetime</div><div class="v num">${moneyShort(lifetimeCb)}</div></div>
+          <div class="item"><div class="k">${tr("Spent")}</div><div class="v num">${moneyShort(monthSp)}</div></div>
+          <div class="item"><div class="k">${tr("Purchases")}</div><div class="v num">${mTx.length}</div></div>
+          <div class="item"><div class="k">${tr("Lifetime")}</div><div class="v num">${moneyShort(lifetimeCb)}</div></div>
         </div>
       </div>
       ${state.cards.length > 1 ? `<div class="seg">
-        <button class="seg-btn ${cardsView === "gallery" ? "on" : ""}" data-action="cards-view" data-v="gallery">Gallery</button>
-        <button class="seg-btn ${cardsView === "list" ? "on" : ""}" data-action="cards-view" data-v="list">List</button>
+        <button class="seg-btn ${cardsView === "gallery" ? "on" : ""}" data-action="cards-view" data-v="gallery">${tr("Gallery")}</button>
+        <button class="seg-btn ${cardsView === "list" ? "on" : ""}" data-action="cards-view" data-v="list">${tr("List")}</button>
       </div>` : ""}
-      <div class="section-title">Your Cards
+      <div class="section-title">${tr("Your Cards")}
         ${state.cards.length > 1 ? `<span class="link" data-action="toggle-reorder-cards">${reorderCards ? "Done" : "Reorder"}</span>` : ""}
       </div>
       ${reorderCards ? `<div class="hint" style="margin:-2px 4px 10px;">Press and drag a handle to move a card.</div>` : ""}
@@ -2356,22 +2612,22 @@
       ${reorderCards ? "" : `<div class="cstat">
         <div class="cstat-row">
           <div class="cs">
-            <div class="cs-k">Spent · ${esc(shortMonth(mk))}</div>
+            <div class="cs-k">${tr("Spent")} · ${esc(shortMonth(mk))}</div>
             <div class="cs-v num">${money(t.monthSpent)}</div>
           </div>
           <div class="cs">
-            <div class="cs-k">Cash back · ${esc(shortMonth(mk))}</div>
+            <div class="cs-k">${tr("Cash back")} · ${esc(shortMonth(mk))}</div>
             <div class="cs-v num mint">${money(t.monthCashback)}</div>
           </div>
         </div>
         ${t.hasCycle ? `<div class="cstat-div"></div>
         <div class="cstat-row">
           <div class="cs">
-            <div class="cs-k">This statement<em>${esc(t.cycleLabel)}</em></div>
+            <div class="cs-k">${tr("This statement")}<em>${esc(t.cycleLabel)}</em></div>
             <div class="cs-v num">${money(t.cycleCashback)}</div>
           </div>
           <div class="cs">
-            <div class="cs-k">Last statement<em>${esc(t.prevCycleLabel)}</em></div>
+            <div class="cs-k">${tr("Last statement")}<em>${esc(t.prevCycleLabel)}</em></div>
             <div class="cs-v num muted">${money(t.prevCycleCashback)}</div>
           </div>
         </div>` : `<div class="cstat-div"></div>
@@ -2560,7 +2816,7 @@
           <ul class="tips">${entry.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
         </div>` : ""}
       ${rules.length || cardCap ? `<div class="hint" style="margin-top:14px;">Checked in August 2026, but issuers change terms often — confirm against your own card agreement and edit anything that differs.</div>` : ""}
-      <button class="btn btn-primary" id="doAdd">Add Card</button>
+      <button class="btn btn-primary" id="doAdd">${tr("Add Card")}</button>
       <button class="btn btn-ghost" id="backBanks2">‹ Back</button>
     `);
     wireSwatches();
@@ -2652,10 +2908,10 @@
       </div>
 
       ${(stmt || due) ? `<div class="section-title">Billing Cycle</div>
-        ${stmt ? `<div class="alert"><div class="ic">${ICON_STATEMENT}</div><div class="body"><div class="t1">Statement closes</div>
+        ${stmt ? `<div class="alert"><div class="ic">${ICON_STATEMENT}</div><div class="body"><div class="t1">${tr("Statement closes")}</div>
           <div class="t2">${stmt.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(stmt)}</div><div class="u">days</div></div></div>` : ""}
-        ${due ? `<div class="alert ${isCardPaid(card) ? "" : daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">${ICON_DUE}</div><div class="body"><div class="t1">Payment due</div>
+        ${due ? `<div class="alert ${isCardPaid(card) ? "" : daysUntil(due) <= 5 ? "due-soon" : ""}"><div class="ic">${ICON_DUE}</div><div class="body"><div class="t1">${tr("Payment due")}</div>
           <div class="t2">${due.toLocaleDateString(undefined, { weekday: "short", month: "long", day: "numeric" })}${isCardPaid(card) ? " · <span style=\"color:var(--mint)\">paid</span>" : ""}</div></div>
           <div class="cnt"><div class="n num">${daysUntil(due)}</div><div class="u">days</div></div></div>
           <button class="btn ${isCardPaid(card) ? "btn-ghost" : "btn-primary"}" data-action="toggle-paid" data-id="${card.id}" style="margin:-4px 0 4px;">
@@ -2904,12 +3160,12 @@
       : histFilter === "cash" ? "Cash only"
       : cardFullName(getCard(histFilter)) || "All sources";
     const chips = '<div class="act-filter">' +
-      '<span class="af-k">Showing</span>' +
+      '<span class="af-k">' + tr("Showing") + '</span>' +
       '<div class="af-sel">' +
         '<select id="histFilterSel">' +
-          '<option value="all" ' + (histFilter === "all" ? "selected" : "") + '>All sources</option>' +
+          '<option value="all" ' + (histFilter === "all" ? "selected" : "") + '>' + tr("All sources") + '</option>' +
           state.cards.map((c) => '<option value="' + c.id + '" ' + (histFilter === c.id ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
-          '<option value="cash" ' + (histFilter === "cash" ? "selected" : "") + '>Cash only</option>' +
+          '<option value="cash" ' + (histFilter === "cash" ? "selected" : "") + '>' + tr("Cash only") + '</option>' +
         '</select>' +
         '<span class="af-val">' + esc(filterName) + '</span>' +
       '</div>' +
@@ -2923,7 +3179,7 @@
 
     const presets = '<div class="chips range-chips">' +
       HIST_PRESETS.map(([m, lbl]) =>
-        '<button class="chip ' + (histRange.mode === m ? "active" : "") + '" data-action="hist-range" data-m="' + m + '">' + lbl + '</button>'
+        '<button class="chip ' + (histRange.mode === m ? "active" : "") + '" data-action="hist-range" data-m="' + m + '">' + tr(lbl) + '</button>'
       ).join("") + '</div>';
 
     let detail = "";
@@ -2936,8 +3192,8 @@
       </div>`;
     } else if (histRange.mode === "custom") {
       detail = `<div class="range-custom">
-        <label class="rc-field"><span>From</span><input type="date" id="histFrom" value="${histRange.from || ""}" /></label>
-        <label class="rc-field"><span>To</span><input type="date" id="histTo" value="${histRange.to || ""}" /></label>
+        <label class="rc-field"><span>${tr("From")}</span><input type="date" id="histFrom" value="${histRange.from || ""}" /></label>
+        <label class="rc-field"><span>${tr("To")}</span><input type="date" id="histTo" value="${histRange.to || ""}" /></label>
       </div>`;
     }
 
@@ -2945,7 +3201,7 @@
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)));
 
     // Range summary doubles as confirmation of what's on screen.
-    const rSpend = list.reduce((sum, t) => sum + t.amount, 0);
+    const rSpend = list.filter(countsAsSpend).reduce((sum, t) => sum + t.amount, 0);
     const rBack = list.reduce((sum, t) => sum + t._cb, 0);
     const summary = '<div class="range-sum">' +
       '<div class="rs-label">' + esc(histRangeLabel()) + '</div>' +
@@ -2967,7 +3223,7 @@
       const mk = t.date.slice(0, 7);
       if (mk !== lastMonth) {
         const mTx = list.filter((x) => x.date.slice(0, 7) === mk);
-        const mSpend = mTx.reduce((s, x) => s + x.amount, 0);
+        const mSpend = mTx.filter(countsAsSpend).reduce((s, x) => s + x.amount, 0);
         const mBack = mTx.reduce((s, x) => s + x._cb, 0);
         html += '<div class="month-bar">' +
           '<div class="mb-name">' + monthLabel(mk) + '</div>' +
@@ -2979,7 +3235,7 @@
       }
       if (t.date !== lastDay) {
         const dTx = list.filter((x) => x.date === t.date);
-        const dSpend = dTx.reduce((s, x) => s + x.amount, 0);
+        const dSpend = dTx.filter(countsAsSpend).reduce((s, x) => s + x.amount, 0);
         const dBack = dTx.reduce((s, x) => s + x._cb, 0);
         html += '<div class="day-bar">' +
           '<div class="db-left">' +
@@ -2994,7 +3250,20 @@
         lastDay = t.date;
       }
 
-      if (isCash(t)) {
+      if (isWalletSpend(t)) {
+        // Spent from a wallet: already-earned cash back, so none shown here.
+        const c = cashCat(t.cashCat);
+        const w = getWallet(t.walletId);
+        html += '<div class="row txn" data-action="open-wallet-txn" data-id="' + t.id + '">' +
+          '<div class="glyph">' + c.icon + '</div>' +
+          '<div class="body">' +
+            '<div class="t1">' + esc(t.note || tr(c.name)) + '<span class="tag wal">' + tr("Wallet") + '</span></div>' +
+            '<div class="t2">' + esc(w ? w.name : tr("Wallet")) + ' · ' + esc(tr(c.name)) + '</div>' +
+          '</div>' +
+          '<div class="tail"><div class="a1 num">' + money(t.amount) + '</div>' +
+          '<div class="a2" style="color:var(--text-3)">' + tr("paid from wallet") + '</div></div>' +
+        '</div>';
+      } else if (isCash(t)) {
         const c = cashCat(t.cashCat);
         html += '<div class="row txn" data-action="open-cash" data-id="' + t.id + '">' +
           '<div class="glyph">' + c.icon + '</div>' +
@@ -3008,7 +3277,8 @@
       } else {
         const card = getCard(t.cardId);
         const info = mccInfo(t.mcc);
-        const badge = t._capped ? '<span class="tag cap">CAP</span>' : t._belowMin ? '<span class="tag pend">MIN</span>' : "";
+        const badge = (isTopup(t) ? '<span class="tag top">' + tr("TOP-UP") + '</span>' : "") +
+          (t._capped ? '<span class="tag cap">CAP</span>' : t._belowMin ? '<span class="tag pend">MIN</span>' : "");
         html += '<div class="row txn" data-action="open-txn" data-id="' + t.id + '">' +
           '<div class="glyph">' + info.icon + '</div>' +
           '<div class="body">' +
@@ -3043,7 +3313,7 @@
         <h2>Edit Purchase</h2>
         <div class="sheet-sub">Earned ${money(t._cb)} at ${t._rate}%</div>
         <div class="field">
-          <label>Amount</label>
+          <label>${tr("Amount")}</label>
           <div class="amount-input"><input id="e_amount" type="text" inputmode="numeric" value="${formatVnd(t.amount)}" /><span class="cur">₫</span></div>
         </div>
         <div class="field">
@@ -3054,12 +3324,12 @@
             <span class="chev">›</span>
           </button>
         </div>
-        <div class="field"><label>Card</label>
+        <div class="field"><label>${tr("Card")}</label>
           <select id="e_card">${state.cards.map((c) => `<option value="${c.id}" ${c.id === t.cardId ? "selected" : ""}>${esc(cardFullName(c))}</option>`).join("")}</select>
         </div>
         <div class="row-2">
-          <div class="field"><label>Date</label><input id="e_date" type="date" value="${t.date}" /></div>
-          <div class="field"><label>Note</label><input id="e_note" type="text" value="${esc(t.note || "")}" /></div>
+          <div class="field"><label>${tr("Date")}</label><input id="e_date" type="date" value="${t.date}" /></div>
+          <div class="field"><label>${tr("Note")}</label><input id="e_note" type="text" value="${esc(t.note || "")}" /></div>
         </div>
         <button class="btn btn-primary" id="e_save">Save Changes</button>
         <button class="btn btn-danger" id="e_del">Delete Purchase</button>
@@ -3105,33 +3375,33 @@
     const tiles = CASH_CATEGORIES.map((c) =>
       '<button type="button" class="cat-tile ' + (c.id === cashDraft.cat ? "sel" : "") + '" data-pickcash="' + c.id + '">' +
         '<span class="ci">' + c.icon + '</span>' +
-        '<span class="cn">' + esc(c.name) + '</span>' +
+        '<span class="cn">' + esc(tr(c.name)) + '</span>' +
       '</button>').join("");
 
     view.innerHTML =
       '<div class="stat" style="margin-bottom:13px;">' +
-        '<div class="k">Cash spent this month</div>' +
+        '<div class="k">' + tr("Cash spent this month") + '</div>' +
         '<div class="v num">' + money(monthCash) + '</div>' +
       '</div>' +
       '<div class="panel">' +
         '<div class="field">' +
-          '<label>Amount</label>' +
+          '<label>' + tr("Amount") + '</label>' +
           '<div class="amount-input">' +
             '<input id="k_amount" type="text" inputmode="numeric" placeholder="0" value="' + esc(cashDraft.amount) + '" />' +
             '<span class="cur">₫</span>' +
           '</div>' +
         '</div>' +
         '<div class="field">' +
-          '<label>Category</label>' +
+          '<label>' + tr("Category") + '</label>' +
           '<div class="cat-grid cash-grid">' + tiles + '</div>' +
         '</div>' +
         '<div class="row-2">' +
-          '<div class="field"><label>Date</label><input id="k_date" type="date" value="' + cashDraft.date + '" /></div>' +
-          '<div class="field"><label>Note</label><input id="k_note" type="text" placeholder="Optional" value="' + esc(cashDraft.note) + '" /></div>' +
+          '<div class="field"><label>' + tr("Date") + '</label><input id="k_date" type="date" value="' + cashDraft.date + '" /></div>' +
+          '<div class="field"><label>' + tr("Note") + '</label><input id="k_note" type="text" placeholder="' + tr("Optional") + '" value="' + esc(cashDraft.note) + '" /></div>' +
         '</div>' +
       '</div>' +
       '<div class="hint" style="margin:-4px 4px 14px;">Cash earns no cash back — these entries are tracked so your spending statistics are complete.</div>' +
-      '<button class="btn btn-primary" id="saveCash">Add Cash Spending</button>';
+      '<button class="btn btn-primary" id="saveCash">' + tr("Add Cash Spending") + '</button>';
 
     const amtEl = document.getElementById("k_amount");
     const dateEl = document.getElementById("k_date");
@@ -3178,13 +3448,13 @@
       openSheet(
         '<h2>Edit Cash Spending</h2>' +
         '<div class="sheet-sub">Cash earns no cash back</div>' +
-        '<div class="field"><label>Amount</label>' +
+        '<div class="field"><label>' + tr("Amount") + '</label>' +
           '<div class="amount-input"><input id="ke_amount" type="text" inputmode="numeric" value="' + formatVnd(t.amount) + '" /><span class="cur">₫</span></div>' +
         '</div>' +
-        '<div class="field"><label>Category</label><div class="cat-grid cash-grid">' + tiles + '</div></div>' +
+        '<div class="field"><label>' + tr("Category") + '</label><div class="cat-grid cash-grid">' + tiles + '</div></div>' +
         '<div class="row-2">' +
-          '<div class="field"><label>Date</label><input id="ke_date" type="date" value="' + t.date + '" /></div>' +
-          '<div class="field"><label>Note</label><input id="ke_note" type="text" value="' + esc(t.note || "") + '" /></div>' +
+          '<div class="field"><label>' + tr("Date") + '</label><input id="ke_date" type="date" value="' + t.date + '" /></div>' +
+          '<div class="field"><label>' + tr("Note") + '</label><input id="ke_note" type="text" value="' + esc(t.note || "") + '" /></div>' +
         '</div>' +
         '<button class="btn btn-primary" id="ke_save">Save Changes</button>' +
         '<button class="btn btn-danger" id="ke_del">Delete</button>' +
@@ -3232,7 +3502,7 @@
 
   function buildReport(monthKey, threshold) {
     const txns = state.transactions.filter((t) => t.date.slice(0, 7) === monthKey);
-    const spend = txns.reduce((s, t) => s + t.amount, 0);
+    const spend = txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const cb = txns.reduce((s, t) => s + t._cb, 0);
     const cash = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
 
@@ -3240,7 +3510,8 @@
     for (const t of txns) {
       const g = txnGroup(t);
       const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
-      e.value += t.amount; e.cb += t._cb; e.n++;
+      if (countsAsSpend(t)) { e.value += t.amount; e.n++; }
+      e.cb += t._cb;
     }
     const cats = Object.keys(byGroup)
       .map((g) => Object.assign({ key: g, name: groupName(g) }, byGroup[g]))
@@ -3481,7 +3752,7 @@
       <div class="panel">
         <div class="stat-2">
           <div class="stat"><div class="k">Cards</div><div class="v num">${state.cards.length}</div></div>
-          <div class="stat"><div class="k">Purchases</div><div class="v num">${state.transactions.length}</div></div>
+          <div class="stat"><div class="k">${tr("Purchases")}</div><div class="v num">${state.transactions.length}</div></div>
         </div>
         <div class="stat" style="margin-top:11px;"><div class="k">Lifetime cash back</div><div class="v mint num">${money(totalCb)}</div></div>
       </div>
@@ -3519,7 +3790,15 @@
         </div>
       </div>
 
-      <div class="section-title">Cash Back Payouts</div>
+      <div class="section-title">${tr("Language")}</div>
+      <div class="panel">
+        <div class="seg">
+          <button class="seg-btn ${(state.settings.lang || "en") === "en" ? "on" : ""}" data-action="set-lang" data-v="en">English</button>
+          <button class="seg-btn ${state.settings.lang === "vi" ? "on" : ""}" data-action="set-lang" data-v="vi">Tiếng Việt</button>
+        </div>
+      </div>
+
+      <div class="section-title">${tr("Cash Back Payouts")}</div>
       <div class="panel">
         <div class="field" style="margin-bottom:8px;">
           <label>Default wait before cash back lands (days)</label>
@@ -3528,7 +3807,7 @@
         <div class="hint" style="margin:0;">Used on the Track tab to work out when each month's cash back is due. Any card can override this in its own settings.</div>
       </div>
 
-      <div class="section-title">Version</div>
+      <div class="section-title">${tr("Version")}</div>
       <div class="panel">
         <div class="toggle-row" style="margin-bottom:14px;">
           <span>
@@ -3536,7 +3815,7 @@
             <span class="tr-t2" id="persistState">Checking storage protection…</span>
           </span>
         </div>
-        <button class="btn btn-secondary" data-action="check-update">Check for Updates</button>
+        <button class="btn btn-secondary" data-action="check-update">${tr("Check for Updates")}</button>
         <div class="hint" style="margin:12px 0 0;">
           Updating from inside the app replaces the code only — your cards and history stay put.
           You never need to delete the app to get a new version.
@@ -3557,8 +3836,8 @@
         </div>
       </div>
 
-      <div class="section-title">Danger Zone</div>
-      <button class="btn btn-danger" data-action="wipe">Erase All Data</button>
+      <div class="section-title">${tr("Danger Zone")}</div>
+      <button class="btn btn-danger" data-action="wipe">${tr("Erase All Data")}</button>
       <div class="hint" style="text-align:center;margin-top:20px;">Cashback Tracker v${APP_VERSION} · data stored locally on this device</div>
     `;
     document.getElementById("importFile").addEventListener("change", onImport);
@@ -3761,6 +4040,8 @@
         state.transactions = d.transactions || [];
         save(); closeSheet(); toast("Snapshot restored"); render();
       } catch (err) { alert("That snapshot is unreadable."); }
+    } else if (a === "open-wallet-txn") {
+      openCashTxn(el.dataset.id);
     } else if (a === "open-cash") {
       openCashTxn(el.dataset.id);
     } else if (a === "goto-stats") {
@@ -3778,6 +4059,22 @@
     } else if (a === "cards-view") {
       cardsView = el.dataset.v;
       renderCards();
+    } else if (a === "set-lang") {
+      state.settings.lang = el.dataset.v;
+      save();
+      applyTabLabels();
+      titleEl.textContent = tr(TITLES[tab]);
+      render();
+      toast(el.dataset.v === "vi" ? "Đã chuyển sang Tiếng Việt" : "Switched to English");
+    } else if (a === "wallet-mode") {
+      walletDraft.mode = el.dataset.v;
+      renderLog();
+    } else if (a === "add-wallet") {
+      openWalletSheet(null);
+    } else if (a === "edit-wallet") {
+      openWalletSheet(el.dataset.id);
+    } else if (a === "manage-wallets") {
+      openWalletManager();
     } else if (a === "log-mode") {
       logMode = el.dataset.v;
       renderLog();
