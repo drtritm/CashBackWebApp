@@ -703,12 +703,10 @@ body::before {
   background: linear-gradient(140deg, rgba(153,78,201,0.16), rgba(255,255,255,0.04));
   border: 1px solid rgba(153,78,201,0.26); border-radius: 18px;
 }
-.wal-pick { position: relative; min-width: 0; flex: 1; }
-.wal-pick select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: none; padding: 0; }
+.wal-pick { min-width: 0; flex: 1; }
 .wh-name {
-  font-size: 17px; font-weight: 700; letter-spacing: -0.015em; padding-right: 18px;
+  font-size: 17px; font-weight: 700; letter-spacing: -0.015em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3adc2' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right center / 15px;
 }
 .wh-bal { text-align: right; flex-shrink: 0; }
 .wh-k {
@@ -790,6 +788,11 @@ body::before {
 .field > label {
   display: block; font-size: 11.5px; font-weight: 700; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--text-3); margin-bottom: 8px;
+}
+.field > label.lbl-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.lbl-link {
+  color: var(--gold); text-transform: none; letter-spacing: 0;
+  font-size: 12.5px; font-weight: 620; white-space: nowrap; cursor: pointer;
 }
 input, select, textarea {
   width: 100%; font-size: 16px; font-family: inherit; color: var(--text);

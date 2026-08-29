@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.18.0";
+  const APP_VERSION = "1.19.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -1419,9 +1419,6 @@
     view.innerHTML =
       '<div class="wal-head">' +
         '<div class="wal-pick">' +
-          '<select id="w_wallet">' +
-            state.wallets.map((x) => '<option value="' + x.id + '" ' + (x.id === w.id ? "selected" : "") + '>' + esc(x.name) + '</option>').join("") +
-          '</select>' +
           '<div class="wh-name">' + esc(w.name) + '</div>' +
         '</div>' +
         '<div class="wh-bal ' + (bal < 0 ? "neg" : "") + '">' +
@@ -1437,6 +1434,7 @@
         '<div class="field"><label>' + tr("Amount") + '</label>' +
           '<div class="amount-input"><input id="w_amount" type="text" inputmode="numeric" placeholder="0" value="' + esc(walletDraft.amount) + '" /><span class="cur">\u20ab</span></div>' +
         '</div>' +
+        paySourceFieldHtml() +
         (topping
           ? '<div class="field"><label>' + tr("Funded by card") + '</label><select id="w_card">' +
               state.cards.map((c) => '<option value="' + c.id + '" ' + (c.id === walletDraft.cardId ? "selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
@@ -1451,8 +1449,7 @@
       (!topping && bal <= 0
         ? '<div class="hint" style="margin:-4px 4px 12px;">' + tr("This wallet has no balance. Top it up first, or log anyway to record the spend.") + '</div>'
         : "") +
-      '<button class="btn btn-primary" id="w_save">' + (topping ? tr("Add Top-Up") : tr("Add Wallet Spending")) + '</button>' +
-      '<button class="btn btn-ghost" data-action="manage-wallets">' + tr("Manage e-wallets") + '</button>';
+      '<button class="btn btn-primary" id="w_save">' + (topping ? tr("Add Top-Up") : tr("Add Wallet Spending")) + '</button>';
 
     const amtEl = document.getElementById("w_amount");
     const dateEl = document.getElementById("w_date");
@@ -1466,9 +1463,7 @@
       if (cEl) walletDraft.cardId = cEl.value;
     };
     amtEl.addEventListener("input", () => { stash(); if (topping) renderLog(); });
-    document.getElementById("w_wallet").addEventListener("change", (e) => {
-      stash(); walletDraft.walletId = e.target.value; walletDraft.cardId = null; walletDraft.cat = null; renderLog();
-    });
+    wirePaySource(stash);
     const cardEl = document.getElementById("w_card");
     if (cardEl) cardEl.addEventListener("change", () => { stash(); renderLog(); });
     view.querySelectorAll("[data-pickwcat]").forEach((b) =>
@@ -2279,25 +2274,77 @@
   const draft = { cardId: null, mcc: null, amount: "", date: null, note: "" };
 
   /* One "Add" tab for both payment methods — a segmented control beats two
-     near-identical tabs competing for space in the bar. */
-  let logMode = "card";   // card | cash | wallet
+     near-identical tabs competing for space in the bar. An e-wallet is not a third
+     kind of logging: it is another thing you pay with, so it sits in the same
+     "Pay with" picker as the cards rather than in its own segment. */
+  let logMode = "card";   // card | cash
+
+  /* What the card tab is currently paying with — a card, or an e-wallet. */
+  let paySource = null;   // { kind: "card" | "wallet", id }
+
+  function paySourceList() {
+    return state.cards.map((c) => ({ kind: "card", id: c.id, name: cardFullName(c) }))
+      .concat((state.wallets || []).map((w) => ({ kind: "wallet", id: w.id, name: w.name })));
+  }
+  /* Resolves the pointer against what actually exists, so a deleted card or wallet
+     falls back to the first remaining source instead of rendering an empty form. */
+  function currentPaySource() {
+    const list = paySourceList();
+    if (!list.length) { paySource = null; return null; }
+    const hit = paySource && list.find((x) => x.kind === paySource.kind && x.id === paySource.id);
+    const pick = hit || list[0];
+    paySource = { kind: pick.kind, id: pick.id };
+    return pick;
+  }
+  function paySourceFieldHtml() {
+    const cur = currentPaySource();
+    const opt = (kind, id, name) => '<option value="' + kind + ':' + id + '"' +
+      (cur && kind === cur.kind && id === cur.id ? " selected" : "") + '>' + esc(name) + '</option>';
+    const cardOpts = state.cards.map((c) => opt("card", c.id, cardFullName(c))).join("");
+    const walOpts = (state.wallets || []).map((w) => opt("wallet", w.id, w.name)).join("");
+    return '<div class="field"><label class="lbl-row">' + tr("Pay with") +
+        '<span class="lbl-link" data-action="manage-wallets">' + tr("E-wallets") + ' \u203a</span></label>' +
+      '<select id="f_source">' +
+        (cardOpts ? '<optgroup label="' + tr("Cards") + '">' + cardOpts + '</optgroup>' : "") +
+        (walOpts ? '<optgroup label="' + tr("E-Wallets") + '">' + walOpts + '</optgroup>' : "") +
+      '</select></div>';
+  }
+  /* `stash` keeps whatever the user has already typed before the form re-renders. */
+  function wirePaySource(stash) {
+    const el = document.getElementById("f_source");
+    if (!el) return;
+    el.addEventListener("change", () => {
+      if (stash) stash();
+      const cut = el.value.indexOf(":");
+      const kind = el.value.slice(0, cut);
+      const id = el.value.slice(cut + 1);
+      paySource = { kind, id };
+      if (kind === "card") draft.cardId = id;
+      else if (id !== walletDraft.walletId) {
+        // Another wallet has its own funding card and default category.
+        walletDraft.walletId = id; walletDraft.cardId = null; walletDraft.cat = null;
+      }
+      renderLog();
+    });
+  }
 
   function renderLog() {
     const seg =
       '<div class="seg seg-lg">' +
         '<button class="seg-btn ' + (logMode === "card" ? "on" : "") + '" data-action="log-mode" data-v="card">' + tr("Card") + '</button>' +
         '<button class="seg-btn ' + (logMode === "cash" ? "on" : "") + '" data-action="log-mode" data-v="cash">' + tr("Cash") + '</button>' +
-        '<button class="seg-btn ' + (logMode === "wallet" ? "on" : "") + '" data-action="log-mode" data-v="wallet">' + tr("Wallet") + '</button>' +
       '</div>';
+    const src = logMode === "cash" ? null : currentPaySource();
     if (logMode === "cash") renderCashForm();
-    else if (logMode === "wallet") renderWalletForm();
+    else if (src && src.kind === "wallet") renderWalletForm();
     else renderLogCard();
     view.insertAdjacentHTML("afterbegin", seg);
   }
 
   function renderLogCard() {
     if (!state.cards.length) {
-      view.innerHTML = `<div class="empty"><div class="ico">💳</div>Add a card first, then log purchases here.</div>`;
+      view.innerHTML = `<div class="empty"><div class="ico">💳</div>Add a card first, then log purchases here.</div>` +
+        `<button class="btn btn-ghost" data-action="manage-wallets">${tr("Manage e-wallets")}</button>`;
       return;
     }
     if (!draft.cardId || !getCard(draft.cardId)) draft.cardId = state.cards[0].id;
@@ -2325,12 +2372,7 @@
             <span class="cur">₫</span>
           </div>
         </div>
-        <div class="field">
-          <label>${tr("Card")}</label>
-          <select id="f_card">
-            ${state.cards.map((c) => `<option value="${c.id}" ${c.id === draft.cardId ? "selected" : ""}>${esc(cardFullName(c))}</option>`).join("")}
-          </select>
-        </div>
+        ${paySourceFieldHtml()}
         <div class="field">
           <label>${tr("Category")}</label>
           <div class="cat-grid">
@@ -2360,17 +2402,15 @@
     `;
 
     const amtEl = document.getElementById("f_amount");
-    const cardEl = document.getElementById("f_card");
     const dateEl = document.getElementById("f_date");
     const noteEl = document.getElementById("f_note");
 
-    function sync() {
+    function stash() {
       draft.amount = amtEl.value;
-      draft.cardId = cardEl.value;
       draft.date = dateEl.value || todayStr();
       draft.note = noteEl.value;
-      preview();
     }
+    function sync() { stash(); preview(); }
     function preview() {
       const card = getCard(draft.cardId);
       const amt = parseVnd(draft.amount);
@@ -2413,8 +2453,9 @@
 
     wireMoneyInput(amtEl);
     amtEl.addEventListener("input", sync);
-    // Switching card changes which categories exist, so re-render rather than just re-preview.
-    cardEl.addEventListener("change", () => { draft.amount = amtEl.value; draft.note = noteEl.value; draft.cardId = cardEl.value; renderLog(); });
+    // Switching the payment source changes which categories exist — and picking a
+    // wallet swaps the whole form — so re-render rather than just re-preview.
+    wirePaySource(stash);
     dateEl.addEventListener("change", sync);
     noteEl.addEventListener("input", sync);
     view.querySelectorAll("[data-pickmcc]").forEach((b) => {

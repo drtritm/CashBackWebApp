@@ -101,6 +101,8 @@ const VI = {
   "Merchant category": "Danh mục cửa hàng",
 
   // ---- wallet ----
+  "Pay with": "Thanh toán bằng",
+  "E-wallets": "Ví điện tử",
   "No e-wallet yet.": "Chưa có ví điện tử.",
   "Add one to track money you load from a card and spend later.":
     "Thêm ví để theo dõi tiền nạp từ thẻ và chi tiêu sau.",

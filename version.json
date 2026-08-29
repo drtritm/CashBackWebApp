@@ -1,5 +1,5 @@
 {
-  "version": "1.18.0",
-  "released": "2026-08-16",
-  "notes": "E-wallets: load money from a card so the top-up earns that card’s cash back, then log what you spend from the wallet — counted once, categorised properly. Plus a Vietnamese language option in Settings."
+  "version": "1.19.0",
+  "released": "2026-08-29",
+  "notes": "E-wallets are no longer a separate way of logging. The Add tab is just Card and Cash now, and every e-wallet sits in the same \"Pay with\" picker as your credit cards — pick one to log a spend or a top-up."
 }
