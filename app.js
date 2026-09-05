@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.19.0";
+  const APP_VERSION = "1.20.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -542,6 +542,25 @@
     const f = (d) => d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
     return `${f(start)} – ${f(end)}`;
   }
+  /* Which billing period a transaction settles in, judged by the card that pays
+     for it. A card with a statement day uses its own cycle — a close day of 20
+     means "September" runs 21 Aug – 20 Sep, so a purchase on 25 Aug is September
+     money and belongs with the cash back the bank pays for that statement. Cash,
+     wallet spends and cards with no close day set fall back to calendar months. */
+  function txnPeriodKey(t) {
+    const card = t.cardId ? getCard(t.cardId) : null;
+    return card ? capPeriodKey(card, t.date, "monthly") : t.date.slice(0, 7);
+  }
+  function currentPeriodKey(card) {
+    return card ? capPeriodKey(card, todayStr(), "monthly") : todayStr().slice(0, 7);
+  }
+  /* Cards can close on different days, so "this period" is per-transaction rather
+     than one shared date window across the whole portfolio. */
+  const inCurrentPeriod = (t) =>
+    txnPeriodKey(t) === currentPeriodKey(t.cardId ? getCard(t.cardId) : null);
+  /* Statement wording only earns its place once a card actually has a close day. */
+  const usesCycles = () => state.cards.some((c) => c.statementDay);
+
   /* Shift a cycle key by n months. */
   function shiftCycleKey(cycleKey, n) {
     const [y, m] = cycleKey.split("-").map(Number);
@@ -963,18 +982,25 @@
       count: txns.length,
       hasCycle: false
     };
-    // Statement cycles run alongside the calendar month, not instead of it —
-    // caps reset on the cycle, but the month figures stay meaningful.
+    // The headline figures follow the card's billing period: with a 20th close
+    // day, "September" is 21 Aug – 20 Sep. Calendar-month figures stay available
+    // alongside them, because that is still how people think about a month.
+    const curKey = card ? capPeriodKey(card, todayStr(), "monthly") : mk;
+    const inPeriod = (k) => txns.filter((t) => (card ? capPeriodKey(card, t.date, "monthly") : t.date.slice(0, 7)) === k);
+    const cur = inPeriod(curKey);
+    out.periodKey = curKey;
+    out.periodLabel = card && card.statementDay ? cycleLabel(card, curKey) : shortMonth(curKey);
+    out.periodCashback = cur.reduce((s, t) => s + t._cb, 0);
+    out.periodSpent = cur.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+
     if (card && card.statementDay) {
-      const curKey = capPeriodKey(card, todayStr(), "monthly");
       const prevKey = shiftCycleKey(curKey, -1);
-      const inCycle = (k) => txns.filter((t) => capPeriodKey(card, t.date, "monthly") === k);
-      const cur = inCycle(curKey), prev = inCycle(prevKey);
+      const prev = inPeriod(prevKey);
       out.hasCycle = true;
       out.cycleKey = curKey;
-      out.cycleLabel = cycleLabel(card, curKey);
-      out.cycleCashback = cur.reduce((s, t) => s + t._cb, 0);
-      out.cycleSpent = cur.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+      out.cycleLabel = out.periodLabel;
+      out.cycleCashback = out.periodCashback;
+      out.cycleSpent = out.periodSpent;
       out.prevCycleKey = prevKey;
       out.prevCycleLabel = cycleLabel(card, prevKey);
       out.prevCycleCashback = prev.reduce((s, t) => s + t._cb, 0);
@@ -1271,8 +1297,8 @@
     }
     const total = state.transactions.reduce((s, t) => s + t._cb, 0);
     const totalSpent = state.transactions.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
-    const mk = todayStr().slice(0, 7);
-    const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
+    const mTx = state.transactions.filter(inCurrentPeriod);
+    const cyc = usesCycles();
     const mCb = mTx.reduce((s, t) => s + t._cb, 0);
     const mSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const mCash = mTx.filter(isCash).reduce((s, t) => s + t.amount, 0);
@@ -1308,7 +1334,7 @@
     // month's cash back so the card doing the most work floats to the top.
     const orderedCards = reorderHome
       ? state.cards
-      : [...state.cards].sort((a, b) => cardTotals(b.id).monthCashback - cardTotals(a.id).monthCashback);
+      : [...state.cards].sort((a, b) => cardTotals(b.id).periodCashback - cardTotals(a.id).periodCashback);
     const cardsHtml = orderedCards.map((c) => {
         const t = cardTotals(c.id);
         if (reorderHome) {
@@ -1332,8 +1358,8 @@
             <div class="cm-meta">${c.issuer ? esc(c.issuer) : "Card"}${dueBadgeHtml(c) ? " " + dueBadgeHtml(c) : ""}</div>
           </div>
           <div class="cm-tail">
-            <div class="cm-cb num">${money(t.monthCashback)}</div>
-            <div class="cm-sp num">${moneyShort(t.monthSpent)} spent</div>
+            <div class="cm-cb num">${money(t.periodCashback)}</div>
+            <div class="cm-sp num">${moneyShort(t.periodSpent)} spent</div>
           </div>
         </div>`;
       }).join("");
@@ -1351,14 +1377,14 @@
           </div>
         </div>
         <div class="sub">
-          <div class="item"><div class="k">${tr("Month back")}</div><div class="v num">${money(mCb)}</div></div>
-          <div class="item"><div class="k">${tr("Month spend")}</div><div class="v num">${moneyShort(mSp)}</div></div>
+          <div class="item"><div class="k">${cyc ? tr("Statement back") : tr("Month back")}</div><div class="v num">${money(mCb)}</div></div>
+          <div class="item"><div class="k">${cyc ? tr("Statement spend") : tr("Month spend")}</div><div class="v num">${moneyShort(mSp)}</div></div>
           <div class="item"><div class="k">${tr("Effective")}</div><div class="v num">${effective.toFixed(2).replace(".", ",")}%</div></div>
         </div>
       </div>
       <div class="stat-2" style="margin-bottom:13px;">
-        <div class="stat"><div class="k">${tr("Card spend · month")}</div><div class="v num">${money(mCard)}</div></div>
-        <div class="stat"><div class="k">${tr("Cash spend · month")}</div><div class="v num">${money(mCash)}</div></div>
+        <div class="stat"><div class="k">${cyc ? tr("Card spend · statement") : tr("Card spend · month")}</div><div class="v num">${money(mCard)}</div></div>
+        <div class="stat"><div class="k">${cyc ? tr("Cash spend · statement") : tr("Cash spend · month")}</div><div class="v num">${money(mCash)}</div></div>
       </div>
       ${alertsHtml}
       <div class="section-title">Cards
@@ -1402,7 +1428,10 @@
         '<span class="ci">' + c.icon + '</span><span class="cn">' + esc(tr(c.name)) + '</span>' +
       '</button>').join("");
 
-    const preview = (() => {
+    /* Built on demand so a keystroke can refresh the figure without re-rendering
+       the form — replacing the amount <input> mid-typing drops focus and closes
+       the on-screen keyboard. */
+    function previewHtml() {
       if (!topping) return "";
       const card = getCard(walletDraft.cardId);
       const amt = parseVnd(walletDraft.amount);
@@ -1414,7 +1443,7 @@
         '<div class="pv-note">' + tr("Top-up is charged to the card as MCC") + ' ' + esc(w.topupMcc || "4121") +
         ' \u00b7 ' + esc(mccInfo(w.topupMcc || "4121").name) + '. ' +
         tr("Cash back is earned here, not when you spend from the wallet.") + '</div></div>';
-    })();
+    }
 
     view.innerHTML =
       '<div class="wal-head">' +
@@ -1445,7 +1474,7 @@
           '<div class="field"><label>' + tr("Note") + '</label><input id="w_note" type="text" placeholder="' + tr("Optional") + '" value="' + esc(walletDraft.note) + '" /></div>' +
         '</div>' +
       '</div>' +
-      preview +
+      '<div id="w_pv"></div>' +
       (!topping && bal <= 0
         ? '<div class="hint" style="margin:-4px 4px 12px;">' + tr("This wallet has no balance. Top it up first, or log anyway to record the spend.") + '</div>'
         : "") +
@@ -1462,10 +1491,14 @@
       const cEl = document.getElementById("w_card");
       if (cEl) walletDraft.cardId = cEl.value;
     };
-    amtEl.addEventListener("input", () => { stash(); if (topping) renderLog(); });
+    const pvEl = document.getElementById("w_pv");
+    const refreshPreview = () => { pvEl.innerHTML = previewHtml(); };
+    amtEl.addEventListener("input", () => { stash(); refreshPreview(); });
+    dateEl.addEventListener("change", () => { stash(); refreshPreview(); });
     wirePaySource(stash);
     const cardEl = document.getElementById("w_card");
-    if (cardEl) cardEl.addEventListener("change", () => { stash(); renderLog(); });
+    if (cardEl) cardEl.addEventListener("change", () => { stash(); refreshPreview(); });
+    refreshPreview();
     view.querySelectorAll("[data-pickwcat]").forEach((b) =>
       b.addEventListener("click", () => { stash(); walletDraft.cat = b.dataset.pickwcat; renderLog(); }));
 
@@ -2593,8 +2626,8 @@
         <div class="cl-meta">${c.issuer ? esc(c.issuer) : "Card"} · up to ${best}%${dueBadgeHtml(c) ? " " + dueBadgeHtml(c) : ""}</div>
       </div>
       <div class="cl-tail">
-        <div class="cl-cb num">${money(t.monthCashback)}</div>
-        <div class="cl-sp num">${moneyShort(t.monthSpent)} spent</div>
+        <div class="cl-cb num">${money(t.periodCashback)}</div>
+        <div class="cl-sp num">${moneyShort(t.periodSpent)} spent</div>
       </div>
     </div>`;
   }
@@ -2605,14 +2638,15 @@
       return;
     }
     const mk = todayStr().slice(0, 7);
-    const mTx = state.transactions.filter((t) => t.date.slice(0, 7) === mk);
+    const cyc = usesCycles();
+    const mTx = state.transactions.filter(inCurrentPeriod);
     const monthCb = mTx.reduce((s, t) => s + t._cb, 0);
     const monthSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
     const lifetimeCb = state.transactions.reduce((s, t) => s + t._cb, 0);
 
     view.innerHTML = `
       <div class="hero" style="padding:20px;">
-        <div class="label">All cards · ${monthLabel(mk)}</div>
+        <div class="label">${cyc ? tr("All cards · current statement") : "All cards · " + monthLabel(mk)}</div>
         <div class="big num">${money(monthCb)}</div>
         <div class="sub">
           <div class="item"><div class="k">${tr("Spent")}</div><div class="v num">${moneyShort(monthSp)}</div></div>
@@ -2653,23 +2687,23 @@
       ${reorderCards ? "" : `<div class="cstat">
         <div class="cstat-row">
           <div class="cs">
-            <div class="cs-k">${tr("Spent")} · ${esc(shortMonth(mk))}</div>
-            <div class="cs-v num">${money(t.monthSpent)}</div>
+            <div class="cs-k">${tr("Spent")}<em>${esc(t.periodLabel)}</em></div>
+            <div class="cs-v num">${money(t.periodSpent)}</div>
           </div>
           <div class="cs">
-            <div class="cs-k">${tr("Cash back")} · ${esc(shortMonth(mk))}</div>
-            <div class="cs-v num mint">${money(t.monthCashback)}</div>
+            <div class="cs-k">${tr("Cash back")}<em>${esc(t.periodLabel)}</em></div>
+            <div class="cs-v num mint">${money(t.periodCashback)}</div>
           </div>
         </div>
         ${t.hasCycle ? `<div class="cstat-div"></div>
         <div class="cstat-row">
           <div class="cs">
-            <div class="cs-k">${tr("This statement")}<em>${esc(t.cycleLabel)}</em></div>
-            <div class="cs-v num">${money(t.cycleCashback)}</div>
-          </div>
-          <div class="cs">
             <div class="cs-k">${tr("Last statement")}<em>${esc(t.prevCycleLabel)}</em></div>
             <div class="cs-v num muted">${money(t.prevCycleCashback)}</div>
+          </div>
+          <div class="cs">
+            <div class="cs-k">${tr("Calendar month")}<em>${esc(shortMonth(mk))}</em></div>
+            <div class="cs-v num muted">${money(t.monthCashback)}</div>
           </div>
         </div>` : `<div class="cstat-div"></div>
         <div class="cstat-note">Set a statement close day to track cash back by statement cycle.</div>`}
@@ -2945,7 +2979,7 @@
 
       <div class="stat-2">
         <div class="stat"><div class="k">Total spent</div><div class="v num">${money(t.spent)}</div></div>
-        <div class="stat"><div class="k">This month</div><div class="v mint num">${money(t.monthCashback)}</div></div>
+        <div class="stat"><div class="k">${t.hasCycle ? tr("This statement") : tr("This month")}</div><div class="v mint num">${money(t.periodCashback)}</div></div>
       </div>
 
       ${(stmt || due) ? `<div class="section-title">Billing Cycle</div>

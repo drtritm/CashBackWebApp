@@ -1,5 +1,5 @@
 {
-  "version": "1.19.0",
-  "released": "2026-08-29",
-  "notes": "E-wallets are no longer a separate way of logging. The Add tab is just Card and Cash now, and every e-wallet sits in the same \"Pay with\" picker as your credit cards — pick one to log a spend or a top-up."
+  "version": "1.20.0",
+  "released": "2026-09-05",
+  "notes": "Overview and Cards now report cash back by billing period instead of calendar month: a card that closes on the 20th shows 21 Aug - 20 Sep together, the way the bank actually settles it. Also fixes the keyboard closing after every digit when entering an e-wallet top-up amount."
 }
