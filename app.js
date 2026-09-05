@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.20.0";
+  const APP_VERSION = "1.20.1";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -643,14 +643,35 @@
     return null;
   }
 
+  /* Which statement the card's paid flag applies to. `latestClosedCycle` answers
+     that for the Statements list, but it deliberately returns nothing for a card
+     with no statement day, and skips cycles that billed nothing — while "Mark as
+     Paid" is offered for any card with a due day. That mismatch left the button
+     inert: it rendered, took the tap, and had no cycle to record against. So fall
+     back, first to the newest cycle that has closed whether or not it was billed,
+     and finally — with no statement day to derive a cycle from — to the due date
+     being settled, which rolls over on its own each month. */
+  function payableCycleKey(card) {
+    if (!card) return null;
+    const billed = latestClosedCycle(card);
+    if (billed) return billed;
+    if (card.statementDay) {
+      const today = todayStr();
+      let k = capPeriodKey(card, today, "monthly");
+      if (isoDate(cycleRange(card, k).end) >= today) k = shiftCycleKey(k, -1);
+      return k;
+    }
+    return card.dueDay ? "due-" + isoDate(nextOccurrence(card.dueDay)) : null;
+  }
+
   function isCardPaid(card) {
-    const k = latestClosedCycle(card);
+    const k = payableCycleKey(card);
     return !!(k && state.payments[paymentKey(card, k)]);
   }
   function togglePaid(cardId) {
     const card = getCard(cardId);
     if (!card) return;
-    const k = latestClosedCycle(card);
+    const k = payableCycleKey(card);
     if (!k) return;
     toggleStatementPaid(paymentKey(card, k));
   }
