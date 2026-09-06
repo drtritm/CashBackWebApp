@@ -681,6 +681,7 @@ body::before {
 .tag.cash { color: var(--text-2); background: var(--surface-2); }
 .tag.wal { color: #c9a3e8; background: rgba(153,78,201,0.18); }
 .tag.top { color: var(--gold); background: var(--gold-soft); }
+.tag.pay { color: var(--mint); background: rgba(58,209,151,0.15); }
 
 .cash-grid { grid-template-columns: 1fr 1fr; }
 

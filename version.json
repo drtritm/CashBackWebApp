@@ -1,5 +1,5 @@
 {
-  "version": "1.20.1",
+  "version": "1.21.0",
   "released": "2026-09-05",
-  "notes": "Fixes Mark as Paid doing nothing on cards with no statement close day set, and on cards whose most recent closed statement had no purchases on it."
+  "notes": "New: record a payment onto a card. Mark it as your own bill and it just clears the statement balance; mark it as a friend paying you back and the amount also comes off your spending totals, so the figures reflect what you actually spent. Add one from a card's detail sheet or from Track > Statements."
 }

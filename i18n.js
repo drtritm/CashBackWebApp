@@ -106,6 +106,38 @@ const VI = {
   "Pick an exact MCC instead ›": "Chọn mã MCC cụ thể ›",
   "Merchant category": "Danh mục cửa hàng",
 
+  // ---- card payments ----
+  "Payments": "Thanh toán",
+  "Payment": "Thanh toán",
+  "Record a Payment": "Ghi một khoản thanh toán",
+  "Edit Payment": "Sửa khoản thanh toán",
+  "Add Payment": "Thêm thanh toán",
+  "Money paid back onto the card. It comes off what the statement still asks for.":
+    "Tiền trả lại vào thẻ. Khoản này được trừ vào số tiền sao kê còn phải trả.",
+  "What is this money?": "Đây là tiền gì?",
+  "My own bill": "Hóa đơn của tôi",
+  "A friend paid me back": "Bạn bè trả lại tôi",
+  "Their share was never your spending, so this comes off your spending totals as well as off the statement.":
+    "Phần của họ vốn không phải chi tiêu của bạn, nên khoản này được trừ cả vào tổng chi tiêu lẫn sao kê.",
+  "You are settling your own bill, so your spending totals stay as they are — only the statement balance drops.":
+    "Bạn đang trả hóa đơn của chính mình, nên tổng chi tiêu giữ nguyên — chỉ số dư sao kê giảm.",
+  "Friend’s share": "Phần của bạn bè",
+  "Bill payment": "Trả hóa đơn",
+  "not your spending": "không tính là chi tiêu",
+  "your own bill": "hóa đơn của bạn",
+  "off your spending": "trừ vào chi tiêu",
+  "off the statement": "trừ vào sao kê",
+  "payment": "thanh toán",
+  "paid off": "đã trả",
+  "of": "trên",
+  "No payments yet.": "Chưa có khoản thanh toán nào.",
+  "Add one when you settle the bill, or when a friend pays you back for something on this card.":
+    "Thêm khi bạn trả hóa đơn, hoặc khi bạn bè trả lại cho khoản bạn đã chi bằng thẻ này.",
+  "Delete this payment?": "Xoá khoản thanh toán này?",
+  "Paid back by friends": "Bạn bè trả lại",
+  "FRIEND": "BẠN BÈ",
+  "PAYMENT": "THANH TOÁN",
+
   // ---- wallet ----
   "Pay with": "Thanh toán bằng",
   "E-wallets": "Ví điện tử",

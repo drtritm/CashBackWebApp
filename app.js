@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.20.1";
+  const APP_VERSION = "1.21.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -80,10 +80,29 @@
      spend happens later when the wallet is used. Counting both would double it. */
   const isTopup = (t2) => t2.type === "topup";
   const isWalletSpend = (t2) => t2.type === "wallet";
-  /* What belongs in "how much did I spend" analysis. */
-  const countsAsSpend = (t2) => !isTopup(t2);
+  /* Money going back onto a card instead of out of it. Both kinds reduce what the
+     statement still asks for, but only one touches the spend totals: a friend's
+     share was never your money, so it nets out of what you spent, while settling
+     your own bill is paying off debt rather than un-spending anything. */
+  const isPayment = (t2) => t2.type === "payment";
+  const isFriendPayment = (t2) => isPayment(t2) && !!t2.forFriend;
+  /* Purchases only — a payment is a movement of money, not a thing bought. */
+  const countsAsSpend = (t2) => !isTopup(t2) && !isPayment(t2);
+  /* Signed contribution to "how much did I spend". */
+  function spendOf(t2) {
+    if (isTopup(t2)) return 0;
+    if (isPayment(t2)) return isFriendPayment(t2) ? -t2.amount : 0;
+    return t2.amount;
+  }
+  const sumSpend = (list) => list.reduce((sum, t2) => sum + spendOf(t2), 0);
+  /* Gross purchases, before any friend reimbursement is netted off. Category and
+     payment-source charts use this so their slices still add up to their own total. */
+  const sumPurchases = (list) => list.filter(countsAsSpend).reduce((sum, t2) => sum + t2.amount, 0);
   /* What the bank actually bills to a card. */
   const onCardStatement = (t2) => !isCash(t2) && !isWalletSpend(t2) && !!t2.cardId;
+  /* Signed effect on a statement balance: charges add to it, payments take away. */
+  const statementDelta = (t2) =>
+    !onCardStatement(t2) ? 0 : (isPayment(t2) ? -t2.amount : t2.amount);
 
   const getWallet = (id) => (state.wallets || []).find((w) => w.id === id);
 
@@ -100,14 +119,17 @@
 
   /* Unified category for any transaction, so cash and card share buckets in stats. */
   function txnGroup(tx) {
+    if (isPayment(tx)) return "other";
     if (isCash(tx) || isWalletSpend(tx)) return cashCat(tx.cashCat).group;
     return mccInfo(tx.mcc).groupId;
   }
   function txnLabel(tx) {
+    if (isPayment(tx)) return tx.forFriend ? tr("Friend\u2019s share") : tr("Bill payment");
     if (isCash(tx) || isWalletSpend(tx)) return tr(cashCat(tx.cashCat).name);
     return mccInfo(tx.mcc).name;
   }
   function txnIcon(tx) {
+    if (isPayment(tx)) return "\u21a9\ufe0f";
     if (isCash(tx) || isWalletSpend(tx)) return cashCat(tx.cashCat).icon;
     return mccInfo(tx.mcc).icon;
   }
@@ -636,7 +658,7 @@
     if (isoDate(cycleRange(card, k).end) >= today) k = shiftCycleKey(k, -1);
     for (let i = 0; i < 24; i++) {
       const billed = state.transactions.some((t) =>
-        !isCash(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
+        !isCash(t) && !isPayment(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
       if (billed) return k;
       k = shiftCycleKey(k, -1);
     }
@@ -700,15 +722,21 @@
         const tx = state.transactions.filter((t) =>
           onCardStatement(t) && t.cardId === card.id && capPeriodKey(card, t.date, "monthly") === k);
         // Statement balance intentionally INCLUDES top-ups — the bank charged them.
-        const balance = tx.reduce((sum, t) => sum + t.amount, 0);
-        if (!closed && balance <= 0) continue;      // nothing to show yet
-        if (closed && balance <= 0) continue;       // nothing was billed
+        // Payments booked into the cycle come off it, so the figure is what is still
+        // owed rather than what was originally billed.
+        const charges = tx.filter((t) => !isPayment(t));
+        const billed = charges.reduce((sum, t) => sum + t.amount, 0);
+        const paidOff = tx.filter(isPayment).reduce((sum, t) => sum + t.amount, 0);
+        const balance = billed - paidOff;
+        // Judged on what was charged, not what is left: a cycle paid down to zero is
+        // still worth showing, while one that never billed anything is not.
+        if (billed <= 0) continue;
         const due = statementDueDate(card, k);
         const key = paymentKey(card, k);
         const rec = state.payments[key] || null;
         rows.push({
           key, card, cycleKey: k, start: range.start, end: range.end, closed,
-          balance, n: tx.length, due,
+          balance, billed, paidOff, n: charges.length, due,
           paid: !!rec, paidDate: rec ? rec.date : null,
           paidAmount: rec && rec.amount != null ? rec.amount : null,
           overdue: !!(!rec && closed && due && isoDate(due) < today)
@@ -779,7 +807,7 @@
     // matched category spend per rule/period before the main pass runs.
     const ruleSpendAcc = {};
     for (const t of state.transactions) {
-      if (isCash(t) || isWalletSpend(t)) continue;
+      if (isCash(t) || isWalletSpend(t) || isPayment(t)) continue;
       const card = getCard(t.cardId);
       if (!card) continue;
       if (card.cardCap && card.cardCap.minSpend > 0) {
@@ -800,7 +828,8 @@
     for (const t of sorted) {
       // Cash earns nothing — it is tracked for spending totals only.
       // Wallet spends earned their cash back at top-up time, so they earn none here.
-      if (isCash(t) || isWalletSpend(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
+      // Payments move money back onto the card, so they earn nothing themselves.
+      if (isCash(t) || isWalletSpend(t) || isPayment(t)) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const card = getCard(t.cardId);
       if (!card) { t._cb = 0; t._rate = 0; t._capped = false; t._ruleId = null; t._belowMin = false; continue; }
       const base = card.baseRate || 0;
@@ -925,7 +954,7 @@
     return ruleSpendCache[k] != null
       ? ruleSpendCache[k]
       : state.transactions
-          .filter((t) => !isCash(t) && t.cardId === card.id && matchRule(card, t.mcc).rule === rule && capPeriodKey(card, t.date, period) === pk)
+          .filter((t) => !isCash(t) && !isPayment(t) && t.cardId === card.id && matchRule(card, t.mcc).rule === rule && capPeriodKey(card, t.date, period) === pk)
           .reduce((s, t) => s + t.amount, 0);
   }
 
@@ -997,9 +1026,9 @@
     const m = txns.filter((t) => t.date.slice(0, 7) === mk);
     const out = {
       cashback: txns.reduce((s, t) => s + t._cb, 0),
-      spent: txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
+      spent: sumSpend(txns),
       monthCashback: m.reduce((s, t) => s + t._cb, 0),
-      monthSpent: m.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
+      monthSpent: sumSpend(m),
       count: txns.length,
       hasCycle: false
     };
@@ -1012,7 +1041,7 @@
     out.periodKey = curKey;
     out.periodLabel = card && card.statementDay ? cycleLabel(card, curKey) : shortMonth(curKey);
     out.periodCashback = cur.reduce((s, t) => s + t._cb, 0);
-    out.periodSpent = cur.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    out.periodSpent = sumSpend(cur);
 
     if (card && card.statementDay) {
       const prevKey = shiftCycleKey(curKey, -1);
@@ -1025,7 +1054,7 @@
       out.prevCycleKey = prevKey;
       out.prevCycleLabel = cycleLabel(card, prevKey);
       out.prevCycleCashback = prev.reduce((s, t) => s + t._cb, 0);
-      out.prevCycleSpent = prev.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+      out.prevCycleSpent = sumSpend(prev);
     }
     return out;
   }
@@ -1317,11 +1346,11 @@
       return;
     }
     const total = state.transactions.reduce((s, t) => s + t._cb, 0);
-    const totalSpent = state.transactions.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    const totalSpent = sumSpend(state.transactions);
     const mTx = state.transactions.filter(inCurrentPeriod);
     const cyc = usesCycles();
     const mCb = mTx.reduce((s, t) => s + t._cb, 0);
-    const mSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    const mSp = sumSpend(mTx);
     const mCash = mTx.filter(isCash).reduce((s, t) => s + t.amount, 0);
     const mCard = mSp - mCash;
     // Effective rate only makes sense against spending that could earn anything.
@@ -1630,6 +1659,119 @@
     );
   }
 
+  // ================= CARD PAYMENTS =================
+  /* Money paid back onto a card. Two kinds, and the difference is the point of the
+     feature: settling your own bill only clears debt, so the spend totals are left
+     alone, while a friend paying you back for something you fronted means that
+     money was never your spending at all — so it nets off the spend figures too.
+     Either way the statement stops asking you for it. */
+  function paymentTitle(t) {
+    return t.note || (t.forFriend ? tr("Friend\u2019s share") : tr("Bill payment"));
+  }
+
+  function openPaymentSheet(cardId, editId) {
+    const existing = editId
+      ? state.transactions.find((x) => x.id === editId && isPayment(x))
+      : null;
+    if (!state.cards.length) { toast(tr("Add a card first")); return; }
+    const d = existing
+      ? { cardId: existing.cardId, amount: existing.amount, date: existing.date,
+          note: existing.note || "", forFriend: !!existing.forFriend }
+      : { cardId: cardId && getCard(cardId) ? cardId : state.cards[0].id,
+          amount: 0, date: todayStr(), note: "", forFriend: false };
+
+    function paint() {
+      openSheet(
+        '<h2>' + (existing ? tr("Edit Payment") : tr("Record a Payment")) + '</h2>' +
+        '<div class="sheet-sub">' + tr("Money paid back onto the card. It comes off what the statement still asks for.") + '</div>' +
+        '<div class="field"><label>' + tr("Card") + '</label><select id="pm_card">' +
+          state.cards.map((c) => '<option value="' + c.id + '"' +
+            (c.id === d.cardId ? " selected" : "") + '>' + esc(cardFullName(c)) + '</option>').join("") +
+        '</select></div>' +
+        '<div class="field"><label>' + tr("Amount") + '</label>' +
+          '<div class="amount-input"><input id="pm_amount" type="text" inputmode="numeric" placeholder="0" value="' +
+            (d.amount > 0 ? formatVnd(d.amount) : "") + '" /><span class="cur">\u20ab</span></div>' +
+        '</div>' +
+        '<div class="field"><label>' + tr("What is this money?") + '</label>' +
+          '<div class="seg">' +
+            '<button type="button" class="seg-btn ' + (!d.forFriend ? "on" : "") + '" data-pmkind="own">' + tr("My own bill") + '</button>' +
+            '<button type="button" class="seg-btn ' + (d.forFriend ? "on" : "") + '" data-pmkind="friend">' + tr("A friend paid me back") + '</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="hint" style="margin:-6px 0 14px;">' + (d.forFriend
+          ? tr("Their share was never your spending, so this comes off your spending totals as well as off the statement.")
+          : tr("You are settling your own bill, so your spending totals stay as they are — only the statement balance drops.")) +
+        '</div>' +
+        '<div class="row-2">' +
+          '<div class="field"><label>' + tr("Date") + '</label><input id="pm_date" type="date" value="' + d.date + '" /></div>' +
+          '<div class="field"><label>' + tr("Note") + '</label><input id="pm_note" type="text" placeholder="' + tr("Optional") + '" value="' + esc(d.note) + '" /></div>' +
+        '</div>' +
+        '<button class="btn btn-primary" id="pm_save">' + (existing ? tr("Save") : tr("Add Payment")) + '</button>' +
+        (existing ? '<button class="btn btn-danger" id="pm_del">' + tr("Delete") + '</button>' : "") +
+        '<button class="btn btn-ghost" data-action="close-sheet">' + tr("Cancel") + '</button>'
+      );
+
+      const amtEl = document.getElementById("pm_amount");
+      wireMoneyInput(amtEl);
+      /* Keeps what has been typed when the kind toggle repaints the sheet. */
+      const stash = () => {
+        d.cardId = document.getElementById("pm_card").value;
+        d.amount = parseVnd(amtEl.value);
+        d.date = document.getElementById("pm_date").value || todayStr();
+        d.note = document.getElementById("pm_note").value;
+      };
+      sheetEl.querySelectorAll("[data-pmkind]").forEach((b) =>
+        b.addEventListener("click", () => { stash(); d.forFriend = b.dataset.pmkind === "friend"; paint(); }));
+
+      document.getElementById("pm_save").addEventListener("click", () => {
+        stash();
+        if (!(d.amount > 0)) { toast(tr("Enter an amount first")); return; }
+        const rec = {
+          type: "payment", cardId: d.cardId, amount: d.amount,
+          date: d.date, note: d.note.trim(), forFriend: d.forFriend
+        };
+        if (existing) Object.assign(existing, rec);
+        else state.transactions.push(Object.assign({ id: uid() }, rec));
+        save(); recompute(); runDailyBackup();
+        closeSheet();
+        toast(d.forFriend
+          ? money(d.amount) + " " + tr("off your spending")
+          : money(d.amount) + " " + tr("off the statement"));
+        render();
+      });
+
+      const del = document.getElementById("pm_del");
+      if (del) del.addEventListener("click", () => {
+        if (!confirm(tr("Delete this payment?"))) return;
+        state.transactions = state.transactions.filter((x) => x.id !== existing.id);
+        save(); recompute(); closeSheet(); toast(tr("Deleted")); render();
+      });
+    }
+    paint();
+  }
+
+  /* The payments already booked against one card, newest first. */
+  function cardPaymentsHtml(card) {
+    const list = state.transactions
+      .filter((t) => isPayment(t) && t.cardId === card.id)
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)))
+      .slice(0, 8);
+    if (!list.length) {
+      return '<div class="empty" style="padding:22px 12px;">' + tr("No payments yet.") + '<br>' +
+        tr("Add one when you settle the bill, or when a friend pays you back for something on this card.") + '</div>';
+    }
+    return list.map((t) =>
+      '<div class="trk" data-action="open-payment" data-id="' + t.id + '">' +
+        '<div class="trk-swatch" style="background:' + gradCss(card.gradient) + '"></div>' +
+        '<div class="trk-body">' +
+          '<div class="trk-t1">' + esc(paymentTitle(t)) + '</div>' +
+          '<div class="trk-t2">' + dateLabel(t.date) + ' \u00b7 ' +
+            (t.forFriend ? tr("not your spending") : tr("your own bill")) + '</div>' +
+        '</div>' +
+        '<div class="trk-amt num">\u2212' + money(t.amount) + '</div>' +
+      '</div>').join("");
+  }
+
   // ================= TRACK: payouts, subscriptions, fees, refunds =================
   let trackView = "incoming";   // incoming | recurring
 
@@ -1906,7 +2048,8 @@
     const current = rows.filter((r) => !r.closed);
     const paid = rows.filter((r) => r.closed && r.paid);
 
-    html += '<div class="section-title">' + tr("To Pay") + '</div>';
+    html += '<div class="section-title">' + tr("To Pay") +
+      '<span class="link" data-action="add-payment">+ ' + tr("Payment") + '</span></div>';
     html += open.length
       ? open.map(statementRow).join("")
       : '<div class="empty" style="padding:22px 14px;">Every closed statement is settled.</div>';
@@ -1943,6 +2086,7 @@
     } else {
       meta = period + " \u00b7 no due day set";
     }
+    if (r.paidOff > 0) meta += " \u00b7 " + money(r.paidOff) + " " + tr("paid off");
     // The open cycle isn't billed yet, so it gets no tick.
     const control = r.closed
       ? '<button class="trk-tick ' + (r.paid ? "on" : "") + '" data-action="toggle-statement" data-key="' +
@@ -1955,7 +2099,9 @@
         '<div class="trk-t2">' + meta + '</div>' +
       '</div>' +
       '<div class="trk-amt num">' + money(r.paidAmount != null ? r.paidAmount : r.balance) +
-        '<span class="trk-sub">' + r.n + " txn" + (r.n === 1 ? "" : "s") + '</span>' +
+        '<span class="trk-sub">' + (r.paidOff > 0
+          ? tr("of") + " " + moneyShort(r.billed)
+          : r.n + " txn" + (r.n === 1 ? "" : "s")) + '</span>' +
       '</div>' +
     '</div>';
   }
@@ -2133,17 +2279,19 @@
   let statsRange = "month";   // month | last | all
   let statsView = "pie";      // pie | bars
 
+  /* Windows on the billing period, matching Overview and Cards: a card that closes
+     on the 20th puts 21 Aug – 20 Sep in "September". It also keeps a purchase and
+     the reimbursement for it in the same window, which a calendar month can split. */
   function statsWindow() {
     const today = todayStr();
     if (statsRange === "all") return { txns: state.transactions.slice(), label: "All time" };
+    let mk = today.slice(0, 7);
     if (statsRange === "last") {
       const d = parseDate(today);
       d.setDate(1); d.setMonth(d.getMonth() - 1);
-      const mk = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
-      return { txns: state.transactions.filter((t) => t.date.slice(0, 7) === mk), label: monthLabel(mk) };
+      mk = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
     }
-    const mk = today.slice(0, 7);
-    return { txns: state.transactions.filter((t) => t.date.slice(0, 7) === mk), label: monthLabel(mk) };
+    return { txns: state.transactions.filter((t) => txnPeriodKey(t) === mk), label: monthLabel(mk) };
   }
 
   /* Donut for part-to-whole. Capped at 6 slices plus "Other" so the validated
@@ -2229,7 +2377,11 @@
   function renderStats() {
     const win = statsWindow();
     const txns = win.txns, label = win.label;
-    const totalSpend = txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    // Charts slice up gross purchases; the tiles report the net figure after a
+    // friend's share is handed back, and the extra row reconciles the two.
+    const grossSpend = sumPurchases(txns);
+    const reimbursed = txns.filter(isFriendPayment).reduce((s, t) => s + t.amount, 0);
+    const totalSpend = sumSpend(txns);
     const totalCb = txns.reduce((s, t) => s + t._cb, 0);
     const cashSpend = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
     const cardSpend = totalSpend - cashSpend;
@@ -2254,6 +2406,8 @@
     // Category rows — cash and card unified into the same MCC groups.
     const byGroup = {};
     for (const t of txns) {
+      // A payment belongs to no category — it settles a bill rather than buying.
+      if (isPayment(t)) continue;
       // Top-ups carry their cash back but no category — the wallet spend has it.
       const g = txnGroup(t);
       const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
@@ -2270,7 +2424,7 @@
       const tx = txns.filter((t) => !isCash(t) && t.cardId === c.id);
       return {
         key: c.id, name: (c.issuer ? c.issuer + " " : "") + c.name, card: c,
-        value: tx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0),
+        value: sumPurchases(tx),
         cb: tx.reduce((s, t) => s + t._cb, 0), n: tx.filter(countsAsSpend).length
       };
     }).filter((r) => r.value > 0);
@@ -2293,12 +2447,12 @@
     if (statsView === "pie") {
       const srcSlices = srcRows.map((r) => Object.assign({}, r, { color: srcColor(r) }));
       body =
-        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(totalSpend) + '</span></div>' +
-        donut(catSlices, moneyShort(totalSpend), label) +
-        '<div class="legend">' + legendRows(catSlices, totalSpend) + '</div>' +
+        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(grossSpend) + '</span></div>' +
+        donut(catSlices, moneyShort(grossSpend), label) +
+        '<div class="legend">' + legendRows(catSlices, grossSpend) + '</div>' +
         '<div class="section-title">' + tr("Where It Was Paid From") + '</div>' +
-        donut(srcSlices, moneyShort(totalSpend), "total spend") +
-        '<div class="legend">' + legendRows(srcSlices, totalSpend) + '</div>';
+        donut(srcSlices, moneyShort(grossSpend), "total spend") +
+        '<div class="legend">' + legendRows(srcSlices, grossSpend) + '</div>';
     } else {
       const maxCat = catRows[0].value || 1;
       const maxSrc = srcRows.length ? srcRows[0].value : 1;
@@ -2306,10 +2460,10 @@
         ? '<div class="share-bar">' + srcRows.map((r) => '<i style="flex:' + r.value + ';background:' + srcColor(r) + '"></i>').join("") + '</div>'
         : "";
       body =
-        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(totalSpend) + '</span></div>' +
-        barRows(catRows, totalSpend, maxCat, () => "linear-gradient(90deg, var(--gold), #e8cf9e)") +
+        '<div class="section-title">' + tr("Spending by Category") + '<span class="link num">' + money(grossSpend) + '</span></div>' +
+        barRows(catRows, grossSpend, maxCat, () => "linear-gradient(90deg, var(--gold), #e8cf9e)") +
         '<div class="section-title">' + tr("Where It Was Paid From") + '</div>' + shareBar +
-        barRows(srcRows, totalSpend, maxSrc, srcColor);
+        barRows(srcRows, grossSpend, maxSrc, srcColor);
     }
 
     view.innerHTML = controls +
@@ -2321,6 +2475,12 @@
         '<div class="stat"><div class="k">' + tr("On cards") + '</div><div class="v num">' + money(cardSpend) + '</div></div>' +
         '<div class="stat"><div class="k">' + tr("In cash") + '</div><div class="v num">' + money(cashSpend) + '</div></div>' +
       '</div>' +
+      (reimbursed > 0
+        ? '<div class="stat-2" style="margin-bottom:6px;">' +
+            '<div class="stat"><div class="k">' + tr("Purchases") + '</div><div class="v num">' + money(grossSpend) + '</div></div>' +
+            '<div class="stat"><div class="k">' + tr("Paid back by friends") + '</div><div class="v mint num">\u2212' + money(reimbursed) + '</div></div>' +
+          '</div>'
+        : "") +
       body;
   }
 
@@ -2662,7 +2822,7 @@
     const cyc = usesCycles();
     const mTx = state.transactions.filter(inCurrentPeriod);
     const monthCb = mTx.reduce((s, t) => s + t._cb, 0);
-    const monthSp = mTx.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    const monthSp = sumSpend(mTx);
     const lifetimeCb = state.transactions.reduce((s, t) => s + t._cb, 0);
 
     view.innerHTML = `
@@ -3014,6 +3174,11 @@
             ${isCardPaid(card) ? "✓ Paid this cycle — tap to undo" : "Mark as Paid"}
           </button>` : ""}` : ""}
 
+      <div class="section-title">${tr("Payments")}
+        <span class="link" data-action="add-payment" data-id="${card.id}">+ ${tr("Add")}</span>
+      </div>
+      ${cardPaymentsHtml(card)}
+
       ${card.cardCap ? (() => {
         const u = cardCapUsage(card, todayStr()) || { used: 0, spend: 0 };
         const unit = card.cardCap.period === "monthly" ? "month" : PERIOD_LABEL[card.cardCap.period];
@@ -3297,7 +3462,7 @@
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id.localeCompare(a.id)));
 
     // Range summary doubles as confirmation of what's on screen.
-    const rSpend = list.filter(countsAsSpend).reduce((sum, t) => sum + t.amount, 0);
+    const rSpend = sumSpend(list);
     const rBack = list.reduce((sum, t) => sum + t._cb, 0);
     const summary = '<div class="range-sum">' +
       '<div class="rs-label">' + esc(histRangeLabel()) + '</div>' +
@@ -3319,7 +3484,7 @@
       const mk = t.date.slice(0, 7);
       if (mk !== lastMonth) {
         const mTx = list.filter((x) => x.date.slice(0, 7) === mk);
-        const mSpend = mTx.filter(countsAsSpend).reduce((s, x) => s + x.amount, 0);
+        const mSpend = sumSpend(mTx);
         const mBack = mTx.reduce((s, x) => s + x._cb, 0);
         html += '<div class="month-bar">' +
           '<div class="mb-name">' + monthLabel(mk) + '</div>' +
@@ -3331,7 +3496,7 @@
       }
       if (t.date !== lastDay) {
         const dTx = list.filter((x) => x.date === t.date);
-        const dSpend = dTx.filter(countsAsSpend).reduce((s, x) => s + x.amount, 0);
+        const dSpend = sumSpend(dTx);
         const dBack = dTx.reduce((s, x) => s + x._cb, 0);
         html += '<div class="day-bar">' +
           '<div class="db-left">' +
@@ -3358,6 +3523,19 @@
           '</div>' +
           '<div class="tail"><div class="a1 num">' + money(t.amount) + '</div>' +
           '<div class="a2" style="color:var(--text-3)">' + tr("paid from wallet") + '</div></div>' +
+        '</div>';
+      } else if (isPayment(t)) {
+        const card = getCard(t.cardId);
+        html += '<div class="row txn" data-action="open-payment" data-id="' + t.id + '">' +
+          '<div class="glyph">\u21a9\ufe0f</div>' +
+          '<div class="body">' +
+            '<div class="t1">' + esc(paymentTitle(t)) +
+              '<span class="tag pay">' + (t.forFriend ? tr("FRIEND") : tr("PAYMENT")) + '</span></div>' +
+            '<div class="t2">' + (card ? esc(card.name) : "Deleted card") + ' \u00b7 ' +
+              (t.forFriend ? tr("off your spending") : tr("off the statement")) + '</div>' +
+          '</div>' +
+          '<div class="tail"><div class="a1 num">\u2212' + money(t.amount) + '</div>' +
+          '<div class="a2" style="color:var(--text-3)">' + tr("payment") + '</div></div>' +
         '</div>';
       } else if (isCash(t)) {
         const c = cashCat(t.cashCat);
@@ -3590,20 +3768,22 @@
 
   function reportMonths() {
     const set = {};
-    for (const t of state.transactions) set[t.date.slice(0, 7)] = true;
+    for (const t of state.transactions) set[txnPeriodKey(t)] = true;
     const keys = Object.keys(set).sort().reverse();
     if (!keys.length) keys.push(todayStr().slice(0, 7));
     return keys;
   }
 
   function buildReport(monthKey, threshold) {
-    const txns = state.transactions.filter((t) => t.date.slice(0, 7) === monthKey);
-    const spend = txns.filter(countsAsSpend).reduce((s, t) => s + t.amount, 0);
+    const txns = state.transactions.filter((t) => txnPeriodKey(t) === monthKey);
+    const spend = sumSpend(txns);
+    const gross = sumPurchases(txns);
     const cb = txns.reduce((s, t) => s + t._cb, 0);
     const cash = txns.filter(isCash).reduce((s, t) => s + t.amount, 0);
 
     const byGroup = {};
     for (const t of txns) {
+      if (isPayment(t)) continue;
       const g = txnGroup(t);
       const e = byGroup[g] || (byGroup[g] = { value: 0, cb: 0, n: 0 });
       if (countsAsSpend(t)) { e.value += t.amount; e.n++; }
@@ -3613,10 +3793,10 @@
       .map((g) => Object.assign({ key: g, name: groupName(g) }, byGroup[g]))
       .sort((a, b) => b.value - a.value);
 
-    const big = txns.filter((t) => t.amount >= threshold)
+    const big = txns.filter((t) => countsAsSpend(t) && t.amount >= threshold)
       .sort((a, b) => b.amount - a.amount);
 
-    return { monthKey, txns, spend, cb, cash, card: spend - cash, cats, big, threshold };
+    return { monthKey, txns, spend, gross, cb, cash, card: spend - cash, cats, big, threshold };
   }
 
   function drawReport(rep) {
@@ -3680,7 +3860,7 @@
     const barW = W - M * 2;
     for (let i = 0; i < rep.cats.length; i++) {
       const c = rep.cats[i];
-      const pct = rep.spend > 0 ? (c.value / rep.spend) * 100 : 0;
+      const pct = rep.gross > 0 ? (c.value / rep.gross) * 100 : 0;
       x.fillStyle = t1; x.font = "650 26px " + FONT;
       x.fillText(c.name, M, y + 26);
       x.fillStyle = t1; x.font = "700 26px " + FONT;
@@ -4083,6 +4263,8 @@
     else if (a === "add-rule") openRuleEditor(el.dataset.cardid, null);
     else if (a === "edit-rule") openRuleEditor(el.dataset.cardid, el.dataset.ruleid);
     else if (a === "open-txn") openTxn(el.dataset.id);
+    else if (a === "add-payment") openPaymentSheet(el.dataset.id || null, null);
+    else if (a === "open-payment") openPaymentSheet(null, el.dataset.id);
     else if (a === "toggle-paid") {
       togglePaid(el.dataset.id);
       toast(isCardPaid(getCard(el.dataset.id)) ? "Marked as paid" : "Marked as unpaid");
