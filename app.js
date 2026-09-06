@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.22.0";
+  const APP_VERSION = "1.22.1";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -1690,6 +1690,7 @@
       '<button class="btn btn-ghost" data-action="close-sheet">' + tr("Cancel") + '</button>'
     );
     wireSwatches();
+    wireCbDelayHint();
     let pickedMcc = d.topupMcc;
     document.getElementById("wl_mcc").addEventListener("click", () => {
       openMccPicker((code) => { pickedMcc = code; d.topupMcc = code; openWalletSheet(id); },
@@ -1968,7 +1969,10 @@
         '<div class="stat"><div class="k">' + tr("Refunds owed") + '</div><div class="v num">' + money(refundOwed) + '</div></div>' +
       '</div>';
 
-    html += '<div class="section-title">' + tr("Cash Back Payouts") + '</div>';
+    html += '<div class="section-title">' + tr("Cash Back Payouts") + '</div>' +
+      '<div class="hint" style="margin:-2px 4px 10px;">' +
+        tr("Each expected date is the statement\u2019s closing date plus that card\u2019s wait, set in Card Settings.") +
+      '</div>';
     if (!pending.length && !done.length) {
       html += '<div class="empty" style="padding:26px 14px;">No cash back earned yet.<br>Log a card purchase and it will appear here.</div>';
     } else {
@@ -3006,7 +3010,7 @@
       <div class="hint">Day of the month, 1–31. Used for the reminders on your Overview screen.</div>
       <div class="row-2">
         <div class="field">
-          <label>Cash Back Paid After (days)</label>
+          <label>Cash Back Paid — days after close</label>
           <input id="c_cbdelay" type="number" min="0" max="180" placeholder="45" value="${c.cashbackDelay != null ? c.cashbackDelay : ""}" />
         </div>
         <div class="field">
@@ -3014,6 +3018,7 @@
           <input id="c_fee" type="text" inputmode="numeric" placeholder="0" value="${c.annualFee ? formatVnd(c.annualFee) : ""}" />
         </div>
       </div>
+      <div class="hint" id="cbDelayEg" style="margin:-4px 0 15px;">${cbDelayExample(c)}</div>
       <div class="field">
         <label>Annual Fee Charged (month)</label>
         <select id="c_feemonth">
@@ -3032,6 +3037,48 @@
       <div class="field"><label>Card Colour</label>${swatchesHtml(c.gradient || GRADIENT_KEYS[state.cards.length % GRADIENT_KEYS.length])}</div>
     `;
   }
+  /* Counted from the STATEMENT CLOSING date, never from the start of the cycle —
+     which is what expectedPayoutDate() does, and the one thing the old label left
+     unsaid. Spelling it out on the card's own dates beats any wording. */
+  function cbDelayExample(c) {
+    const days = (c && c.cashbackDelay != null)
+      ? c.cashbackDelay
+      : (state.settings.defaultCashbackDelay || 45);
+    const dayTxt = days + " day" + (days === 1 ? "" : "s");
+    if (!c || !c.statementDay) {
+      const [ey, em] = todayStr().split("-").map(Number);
+      const monthEnd = lastDayOfMonth(ey, em - 1);
+      return "Counted from the day the statement <b>closes</b>, not from the start of the cycle. " +
+        "No close day set above, so this card counts from the last day of the month instead — " +
+        dateLabel(isoDate(monthEnd)) + " + " + dayTxt + " lands on <b>" +
+        dateLabel(isoDate(addDays(monthEnd, days))) + "</b>.";
+    }
+    // Anchored on the cycle currently running, so the dates are ones you recognise.
+    const key = capPeriodKey(c, todayStr(), "monthly");
+    const close = cycleRange(c, key).end;
+    const paid = addDays(close, days);
+    return "Counted from the day the statement <b>closes</b>, not from the start of the cycle. " +
+      "This card closes <b>" + dateLabel(isoDate(close)) + "</b>, so that statement’s cash back is " +
+      "expected " + dayTxt + " later, on <b>" + dateLabel(isoDate(paid)) + "</b>.";
+  }
+
+  /* Keeps the example honest while the close day and the delay are being typed. */
+  function wireCbDelayHint() {
+    const out = document.getElementById("cbDelayEg");
+    const delayEl = document.getElementById("c_cbdelay");
+    const stmtEl = document.getElementById("c_stmt");
+    if (!out || !delayEl || !stmtEl) return;
+    const paint = () => {
+      const stmt = parseInt(stmtEl.value, 10);
+      out.innerHTML = cbDelayExample({
+        statementDay: stmt >= 1 && stmt <= 31 ? stmt : null,
+        cashbackDelay: delayEl.value !== "" ? Math.max(0, parseInt(delayEl.value, 10) || 0) : null
+      });
+    };
+    delayEl.addEventListener("input", paint);
+    stmtEl.addEventListener("input", paint);
+  }
+
   function readCardForm(existing) {
     const baseEl = document.getElementById("c_base");
     const delayEl = document.getElementById("c_cbdelay");
@@ -3156,6 +3203,7 @@
       <button class="btn btn-ghost" id="backBanks2">‹ Back</button>
     `);
     wireSwatches();
+    wireCbDelayHint();
     document.getElementById("backBanks2").addEventListener("click", () => (bank ? openBankCards(bank.id) : openAddCard()));
     document.getElementById("doAdd").addEventListener("click", () => {
       const f = readCardForm();
@@ -3296,6 +3344,7 @@
       <button class="btn btn-ghost" data-action="close-sheet">Close</button>
     `);
     wireSwatches();
+    wireCbDelayHint();
   }
 
   // ---------------- rule editor ----------------
@@ -4157,10 +4206,15 @@
       <div class="section-title">${tr("Cash Back Payouts")}</div>
       <div class="panel">
         <div class="field" style="margin-bottom:8px;">
-          <label>Default wait before cash back lands (days)</label>
+          <label>Default wait — days after a statement closes</label>
           <input id="cbDelayDefault" type="number" min="0" max="180" value="${state.settings.defaultCashbackDelay || 45}" />
         </div>
-        <div class="hint" style="margin:0;">Used on the Track tab to work out when each month's cash back is due. Any card can override this in its own settings.</div>
+        <div class="hint" style="margin:0;">
+          Counted from the day a statement <b>closes</b>, not from the start of the cycle:
+          a statement closing on 20 Sep with a 45-day wait is expected to pay on 4 Nov.
+          A card with no close day set counts from the last day of the month instead.
+          Used on the Track tab, and any card can override it in its own settings.
+        </div>
       </div>
 
       <div class="section-title">${tr("Version")}</div>

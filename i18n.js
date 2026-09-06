@@ -106,6 +106,8 @@ const VI = {
   "Pick an exact MCC instead ›": "Chọn mã MCC cụ thể ›",
   "Merchant category": "Danh mục cửa hàng",
 
+  "Each expected date is the statement’s closing date plus that card’s wait, set in Card Settings.":
+    "Mỗi ngày dự kiến là ngày chốt sao kê cộng thời gian chờ của thẻ đó, được đặt trong Cài đặt thẻ.",
   // ---- what's new ----
   "What’s New": "Có gì mới",
   "Everything that changed, newest first. Tap a release to open it.":

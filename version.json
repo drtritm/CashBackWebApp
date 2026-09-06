@@ -1,5 +1,5 @@
 {
-  "version": "1.22.0",
+  "version": "1.22.1",
   "released": "2026-09-06",
-  "notes": "New: Settings now has a What's New list covering every release, with step-by-step instructions for each feature it introduced. A dot on the Settings gear tells you when there is something you have not read."
+  "notes": "Clearer cash back timing: the wait is counted from the day the statement closes, and card settings now say so with a worked example on that card's own dates."
 }

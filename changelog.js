@@ -15,6 +15,18 @@
    one — the thing simply works now. */
 const CHANGELOG = [
   {
+    version: "1.22.1",
+    date: "2026-09-06",
+    title: "Clearer cash back timing",
+    summary: "The cash back wait is counted from the day the statement closes — the card settings now say so instead of leaving you to guess.",
+    changes: [
+      "The field is now labelled <b>Cash Back Paid — days after close</b>, and a line beneath it works the example out on that card’s own dates.",
+      "It updates live as you type the close day or the number of days.",
+      "A card with no close day set counts from the last day of the month instead, and the example says so.",
+      "Track → Incoming explains the same rule above the payout list."
+    ]
+  },
+  {
     version: "1.22.0",
     date: "2026-09-06",
     title: "What’s New, in Settings",
