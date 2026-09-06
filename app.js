@@ -2,7 +2,7 @@
   "use strict";
 
   /* App version. Bump this together with version.json and sw.js on every release. */
-  const APP_VERSION = "1.21.0";
+  const APP_VERSION = "1.22.0";
 
   /* NEVER rename these keys. They are where the user's data physically lives —
      changing one orphans every existing install's history. Schema changes must be
@@ -185,6 +185,10 @@
       settings: {
         recentMccs: [], notify: false, notifyDays: 3, autoBackup: true, lang: "en",
         lastSnapshotDate: null, lastSavedDate: null,
+        /* The release whose notes have already been read. Null on a fresh install,
+           which is treated as "already seen" so a first-time user is not badged
+           about changes they were never here for. */
+        lastSeenVersion: null,
         defaultCashbackDelay: 45
       }
     };
@@ -337,6 +341,82 @@
 
   // ---------------- version & updates ----------------
   let latestRelease = null;
+
+  // ---------------- what's new ----------------
+  /* Release notes live in changelog.js. Nothing here assumes it loaded — a
+     missing file costs the feature, not the app. */
+  const releases = () => (typeof CHANGELOG !== "undefined" && Array.isArray(CHANGELOG)) ? CHANGELOG : [];
+
+  /* True when this build is newer than the last release the user read about.
+     A fresh install has no mark, so it silently adopts the current version
+     rather than announcing a history it did not live through. */
+  function hasUnreadRelease() {
+    if (!releases().length) return false;
+    const seen = state.settings.lastSeenVersion;
+    if (!seen) {
+      // No mark yet. An install carrying data predates this feature and has really
+      // missed the notes; an empty one is brand new and adopts the version quietly
+      // rather than announcing a history it was never here for.
+      if (state.cards.length || state.transactions.length) return true;
+      state.settings.lastSeenVersion = APP_VERSION;
+      save();
+      return false;
+    }
+    return compareVersions(APP_VERSION, seen) > 0;
+  }
+  function markReleasesRead() {
+    if (state.settings.lastSeenVersion === APP_VERSION) return;
+    state.settings.lastSeenVersion = APP_VERSION;
+    save();
+  }
+  /* A dot on the Settings gear is the whole notification: the notes are worth
+     finding, not worth interrupting a task for. */
+  function paintWhatsNewBadge() {
+    settingsBtn.classList.toggle("has-new", hasUnreadRelease());
+  }
+
+  function openWhatsNew() {
+    const list = releases();
+    if (!list.length) { toast(tr("No release notes available")); return; }
+    const seen = state.settings.lastSeenVersion;
+    const isNew = (r, i) => seen ? compareVersions(r.version, seen) > 0 : i === 0;
+
+    const entry = (r, i) => {
+      const open = i === 0;
+      const how = r.howTo
+        ? '<div class="cl-how">' +
+            '<div class="cl-how-t">' + esc(r.howTo.title) + '</div>' +
+            '<ol class="cl-steps">' + r.howTo.steps.map((x) => '<li>' + x + '</li>').join("") + '</ol>' +
+            (r.howTo.tip ? '<div class="cl-tip">' + r.howTo.tip + '</div>' : "") +
+          '</div>'
+        : "";
+      return '<details class="cl-entry"' + (open ? " open" : "") + '>' +
+        '<summary>' +
+          '<span class="cl-head">' +
+            '<span class="cl-title">' + esc(r.title) + '</span>' +
+            '<span class="cl-meta">v' + esc(r.version) + ' \u00b7 ' + esc(r.date) +
+              (isNew(r, i) ? '<span class="cl-new">' + tr("NEW") + '</span>' : "") + '</span>' +
+          '</span>' +
+          '<span class="chev">\u203a</span>' +
+        '</summary>' +
+        '<div class="cl-body">' +
+          '<div class="cl-sum">' + esc(r.summary) + '</div>' +
+          '<ul class="cl-list">' + (r.changes || []).map((x) => '<li>' + x + '</li>').join("") + '</ul>' +
+          how +
+        '</div>' +
+      '</details>';
+    };
+
+    openSheet(
+      '<h2>' + tr("What\u2019s New") + '</h2>' +
+      '<div class="sheet-sub">' + tr("Everything that changed, newest first. Tap a release to open it.") + '</div>' +
+      '<div class="cl-wrap">' + list.map(entry).join("") + '</div>' +
+      '<button class="btn btn-ghost" data-action="close-sheet">' + tr("Close") + '</button>'
+    );
+    // Reading the list is the acknowledgement, so the badge clears on open.
+    markReleasesRead();
+    paintWhatsNewBadge();
+  }
 
   function compareVersions(a, b) {
     const pa = String(a).split(".").map(Number);
@@ -4091,6 +4171,12 @@
             <span class="tr-t2" id="persistState">Checking storage protection…</span>
           </span>
         </div>
+        <button class="btn btn-secondary" data-action="whats-new">
+          ${tr("What’s New")}${hasUnreadRelease() ? ` <span class="pill-new">${tr("NEW")}</span>` : ""}
+        </button>
+        <div class="hint" style="margin:10px 0 14px;">
+          What each release added, and how to use it. ${releases().length ? "Latest: " + esc(releases()[0].title) + "." : ""}
+        </div>
         <button class="btn btn-secondary" data-action="check-update">${tr("Check for Updates")}</button>
         <div class="hint" style="margin:12px 0 0;">
           Updating from inside the app replaces the code only — your cards and history stay put.
@@ -4263,6 +4349,7 @@
     else if (a === "add-rule") openRuleEditor(el.dataset.cardid, null);
     else if (a === "edit-rule") openRuleEditor(el.dataset.cardid, el.dataset.ruleid);
     else if (a === "open-txn") openTxn(el.dataset.id);
+    else if (a === "whats-new") openWhatsNew();
     else if (a === "add-payment") openPaymentSheet(el.dataset.id || null, null);
     else if (a === "open-payment") openPaymentSheet(null, el.dataset.id);
     else if (a === "toggle-paid") {
@@ -4400,6 +4487,7 @@
   document.getElementById("topbarAction").addEventListener("click", openAddCard);
   // Settings moved out of the tab bar; the gear toggles in and out of it.
   settingsBtn.addEventListener("click", () => go(tab === "more" ? "home" : "more"));
+  paintWhatsNewBadge();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));

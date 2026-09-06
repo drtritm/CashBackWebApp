@@ -1,5 +1,5 @@
 {
-  "version": "1.21.0",
-  "released": "2026-09-05",
-  "notes": "New: record a payment onto a card. Mark it as your own bill and it just clears the statement balance; mark it as a friend paying you back and the amount also comes off your spending totals, so the figures reflect what you actually spent. Add one from a card's detail sheet or from Track > Statements."
+  "version": "1.22.0",
+  "released": "2026-09-06",
+  "notes": "New: Settings now has a What's New list covering every release, with step-by-step instructions for each feature it introduced. A dot on the Settings gear tells you when there is something you have not read."
 }

@@ -74,6 +74,14 @@ body::before {
 }
 .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .icon-btn.on { color: var(--gold); background: var(--gold-soft); border-color: rgba(217,183,121,0.32); }
+/* An unread release puts a dot on the gear — findable, not interrupting. */
+.icon-btn.has-new { position: relative; }
+.icon-btn.has-new::after {
+  content: ""; position: absolute; top: 6px; right: 6px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--gold); box-shadow: 0 0 0 2px var(--bg, #0b0d13);
+}
+
 .seg.seg-lg { margin-bottom: 14px; }
 
 .topbar-action {
@@ -1049,3 +1057,72 @@ input::placeholder { color: var(--text-3); }
 .stat .k { font-size: 10.5px; font-weight: 700; letter-spacing: 0.11em; text-transform: uppercase; color: var(--text-3); }
 .stat .v { font-size: 22px; font-weight: 720; letter-spacing: -0.03em; margin-top: 6px; }
 .stat .v.mint { color: var(--mint); }
+
+/* ---------- what's new (release notes) ---------- */
+.pill-new {
+  display: inline-block; margin-left: 7px; padding: 2px 7px;
+  border-radius: 999px; background: var(--gold); color: #201f1c;
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.09em; vertical-align: 1px;
+}
+.cl-wrap { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px; }
+.cl-entry {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-md); overflow: hidden;
+}
+.cl-entry[open] { border-color: rgba(217,183,121,0.26); background: rgba(217,183,121,0.05); }
+.cl-entry > summary {
+  display: flex; align-items: center; gap: 12px; padding: 14px 15px;
+  cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent;
+}
+.cl-entry > summary::-webkit-details-marker { display: none; }
+.cl-head { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.cl-title {
+  font-size: 15px; font-weight: 700; letter-spacing: -0.012em; color: var(--text);
+}
+.cl-meta {
+  font-size: 11.5px; font-weight: 600; color: var(--text-3);
+  font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px;
+}
+.cl-new {
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--gold-soft); color: var(--gold);
+  font-size: 9px; font-weight: 800; letter-spacing: 0.09em;
+}
+.cl-entry > summary .chev {
+  color: var(--text-3); font-size: 20px; flex-shrink: 0;
+  transition: transform 0.2s var(--ease);
+}
+.cl-entry[open] > summary .chev { transform: rotate(90deg); }
+.cl-body { padding: 0 15px 15px; }
+.cl-sum {
+  font-size: 13.5px; line-height: 1.6; color: var(--text-2);
+  padding-bottom: 12px; border-bottom: 1px solid var(--hairline-soft);
+}
+.cl-list { margin: 12px 0 0; padding-left: 17px; }
+.cl-list li {
+  font-size: 13px; line-height: 1.62; color: var(--text-2);
+  margin-bottom: 7px; padding-left: 2px;
+}
+.cl-list li::marker { color: var(--gold); }
+.cl-list b, .cl-steps b, .cl-tip b { color: var(--text); font-weight: 680; }
+
+/* the walkthrough for whatever the release introduced */
+.cl-how {
+  margin-top: 14px; padding: 13px 14px 4px;
+  background: rgba(255,255,255,0.035); border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-sm);
+}
+.cl-how-t {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--gold); margin-bottom: 10px;
+}
+.cl-steps { margin: 0; padding-left: 19px; counter-reset: cl; }
+.cl-steps li {
+  font-size: 13px; line-height: 1.62; color: var(--text-2); margin-bottom: 9px;
+}
+.cl-steps li::marker { color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
+.cl-tip {
+  margin: 2px -14px 0; padding: 11px 14px;
+  border-top: 1px solid var(--hairline-soft);
+  font-size: 12.5px; line-height: 1.6; color: var(--text-3);
+}

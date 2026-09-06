@@ -106,6 +106,13 @@ const VI = {
   "Pick an exact MCC instead ›": "Chọn mã MCC cụ thể ›",
   "Merchant category": "Danh mục cửa hàng",
 
+  // ---- what's new ----
+  "What’s New": "Có gì mới",
+  "Everything that changed, newest first. Tap a release to open it.":
+    "Tất cả thay đổi, mới nhất trước. Chạm vào một phiên bản để xem chi tiết.",
+  "NEW": "MỚI",
+  "No release notes available": "Chưa có ghi chú phiên bản",
+
   // ---- card payments ----
   "Payments": "Thanh toán",
   "Payment": "Thanh toán",
